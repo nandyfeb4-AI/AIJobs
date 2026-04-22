@@ -1,0 +1,32 @@
+{
+  "name": "aijobs",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "npm@10.9.7",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "db:generate": "prisma generate",
+    "db:migrate:dev": "prisma migrate dev",
+    "db:studio": "prisma studio",
+    "dev:web": "npm run dev -w @aijobs/web",
+    "dev:api": "npm run dev -w @aijobs/api",
+    "dev:worker": "npm run dev -w @aijobs/worker"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.1",
+    "@types/node": "^24.6.0",
+    "eslint": "^9.37.0",
+    "eslint-config-next": "^15.5.4",
+    "prettier": "^3.6.2",
+    "prisma": "^6.16.2",
+    "turbo": "^2.5.8",
+    "typescript": "^5.9.3"
+  }
+}
