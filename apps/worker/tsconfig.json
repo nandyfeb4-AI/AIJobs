@@ -4,11 +4,13 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": "../..",
     "noEmit": false
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "../../packages/types/src/**/*.ts",
+    "../../packages/config/src/**/*.ts",
+    "../../packages/utils/src/**/*.ts"
   ]
 }
-

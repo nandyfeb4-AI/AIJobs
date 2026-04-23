@@ -8,3 +8,27 @@ export type JobMatch = {
   applyMode?: ApplyMode;
 };
 
+export type ExternalJobSource = "greenhouse" | "lever" | "ashby" | "adzuna";
+
+export type SourceBoardConfig = {
+  source: ExternalJobSource;
+  boardToken: string;
+};
+
+export type AggregatedJob = {
+  id: string;
+  source: ExternalJobSource;
+  boardToken: string;
+  title: string;
+  company: string;
+  companyLogoUrl?: string | null;
+  location: string | null;
+  workMode: string | null;
+  employmentType: string | null;
+  salary: string | null;
+  description: string | null;
+  applyUrl: string;
+  postedAt: string | null;
+  department: string | null;
+  team: string | null;
+};

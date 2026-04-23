@@ -21,6 +21,19 @@ enum ApplicationStage {
   rejected
 }
 
+enum JobStatus {
+  active
+  stale
+  inactive
+}
+
+enum BoardSyncStatus {
+  unverified
+  working
+  empty
+  failed
+}
+
 model User {
   id           String         @id @default(uuid()) @db.Uuid
   authId       String         @unique
@@ -75,9 +88,13 @@ model ResumeVersion {
 model Job {
   id             String         @id @default(uuid()) @db.Uuid
   sourceId       String?
+  sourceKey      String         @unique
   sourceName     String
+  boardToken     String?
   title          String
   company        String
+  companyDomain  String?
+  companyLogoUrl String?
   location       String?
   employmentType String?
   salaryMin      Int?
@@ -86,12 +103,45 @@ model Job {
   description    String
   applyUrl       String
   postedAt       DateTime?
+  sourceUpdatedAt DateTime?
+  firstSeenAt    DateTime       @default(now())
+  lastSeenAt     DateTime       @default(now())
+  lastSyncedAt   DateTime       @default(now())
+  contentHash    String?
+  status         JobStatus      @default(active)
+  syncCount      Int            @default(1)
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
   matches        JobMatch[]
   versions       ResumeVersion[]
   applications   Application[]
   tailoringRuns  TailoringRun[]
+
+  @@index([sourceName, boardToken])
+  @@index([status, postedAt])
+}
+
+model SourceBoard {
+  id                String          @id @default(uuid()) @db.Uuid
+  sourceName        String
+  boardToken        String
+  company           String
+  companyDomain     String?
+  tier              String?
+  status            BoardSyncStatus @default(unverified)
+  active            Boolean         @default(true)
+  lastCheckedAt     DateTime?
+  lastSuccessAt     DateTime?
+  lastFailureAt     DateTime?
+  lastFailureReason String?
+  lastSeenJobCount  Int?
+  lastTargetJobCount Int?
+  totalPersistedJobs Int            @default(0)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([sourceName, boardToken])
+  @@index([status, sourceName])
 }
 
 model JobMatch {

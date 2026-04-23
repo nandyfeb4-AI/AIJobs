@@ -4,13 +4,15 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": "../..",
     "noEmit": false,
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "../../packages/types/src/**/*.ts",
+    "../../packages/config/src/**/*.ts",
+    "../../packages/utils/src/**/*.ts"
   ]
 }
-
