@@ -1,6 +1,7 @@
 import type { ExternalJobSource } from "@aijobs/types";
 
 import { getStarterBoardMetadata } from "./board-catalog";
+import { getTargetCompanies } from "./target-company-catalog";
 
 const ATS_HOSTS = [
   "boards.greenhouse.io",
@@ -13,6 +14,13 @@ const ATS_HOSTS = [
 
 function normalizeDomain(hostname: string) {
   return hostname.replace(/^www\./i, "").toLowerCase();
+}
+
+function normalizeText(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
 }
 
 function domainFromUrl(url?: string | null) {
@@ -36,6 +44,24 @@ function logoUrlForDomain(domain: string | null) {
   return `https://www.google.com/s2/favicons?sz=128&domain_url=${encodeURIComponent(domain)}`;
 }
 
+function targetMetadataForBoard(source: ExternalJobSource, boardToken: string, companyFallback: string) {
+  const normalizedToken = normalizeText(boardToken);
+  const normalizedCompany = normalizeText(companyFallback);
+
+  return getTargetCompanies().find((candidate) => {
+    if (candidate.expectedSource !== source) {
+      return false;
+    }
+
+    const candidateToken = normalizeText(candidate.careersUrl.split("/").pop() ?? "");
+    if (candidateToken && candidateToken === normalizedToken) {
+      return true;
+    }
+
+    return normalizeText(candidate.company) === normalizedCompany;
+  });
+}
+
 export function resolveCompanyBranding(input: {
   source: ExternalJobSource;
   boardToken: string;
@@ -43,8 +69,13 @@ export function resolveCompanyBranding(input: {
   applyUrl?: string | null;
 }) {
   const starterMetadata = getStarterBoardMetadata(input.source, input.boardToken);
-  const domain = starterMetadata?.domain ?? domainFromUrl(input.applyUrl);
-  const company = starterMetadata?.company ?? input.companyFallback;
+  const targetMetadata = targetMetadataForBoard(
+    input.source,
+    input.boardToken,
+    input.companyFallback,
+  );
+  const domain = starterMetadata?.domain ?? targetMetadata?.domain ?? domainFromUrl(input.applyUrl);
+  const company = starterMetadata?.company ?? targetMetadata?.company ?? input.companyFallback;
 
   return {
     company,

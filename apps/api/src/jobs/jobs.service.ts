@@ -734,12 +734,32 @@ export class JobsService {
     const jobs = usJobs
       .filter((job) => isTargetRole(job))
       .sort((left, right) => compareJobsByPostedAt(right, left));
+    const existingBoard = await (this.prisma as any).sourceBoard.findUnique({
+      where: {
+        sourceName_boardToken: {
+          sourceName: source,
+          boardToken,
+        },
+      },
+      select: {
+        companyDomain: true,
+      },
+    });
+    const boardDomain = existingBoard?.companyDomain ?? null;
 
     const seenSourceKeys: string[] = [];
     let persisted = 0;
 
     for (const job of jobs) {
       seenSourceKeys.push(job.id);
+      const resolvedDomain =
+        this.companyDomain(job.companyLogoUrl) ??
+        boardDomain ??
+        this.targetCompanyDomain(job.company) ??
+        this.publicCompanyDomainFromUrl(job.applyUrl) ??
+        null;
+      const resolvedLogoUrl = job.companyLogoUrl ?? this.logoUrlForDomain(resolvedDomain);
+
       await this.prisma.job.upsert({
         where: { sourceKey: job.id },
         create: {
@@ -749,8 +769,8 @@ export class JobsService {
           boardToken: job.boardToken,
           title: job.title,
           company: job.company,
-          companyDomain: this.companyDomain(job.companyLogoUrl),
-          companyLogoUrl: job.companyLogoUrl,
+          companyDomain: resolvedDomain,
+          companyLogoUrl: resolvedLogoUrl,
           location: job.location,
           employmentType: job.employmentType,
           remoteType: job.workMode,
@@ -767,8 +787,8 @@ export class JobsService {
         update: {
           title: job.title,
           company: job.company,
-          companyDomain: this.companyDomain(job.companyLogoUrl),
-          companyLogoUrl: job.companyLogoUrl,
+          companyDomain: resolvedDomain,
+          companyLogoUrl: resolvedLogoUrl,
           location: job.location,
           employmentType: job.employmentType,
           remoteType: job.workMode,

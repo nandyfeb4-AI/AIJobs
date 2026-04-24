@@ -11,7 +11,7 @@ import { GreenhouseAdapter } from "../../api/src/jobs/adapters/greenhouse.adapte
 import { LeverAdapter } from "../../api/src/jobs/adapters/lever.adapter";
 import { discoverBoardsForCompany } from "../../api/src/jobs/board-discovery";
 import { getStarterBoardMetadata } from "../../api/src/jobs/board-catalog";
-import { getTargetCompanyById } from "../../api/src/jobs/target-company-catalog";
+import { getTargetCompanies, getTargetCompanyById } from "../../api/src/jobs/target-company-catalog";
 import {
   BOARD_DISCOVERY_QUEUE,
   JOBS_INGEST_QUEUE,
@@ -67,9 +67,48 @@ function companyDomain(logoUrl?: string | null) {
   }
 }
 
+function normalizeText(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function targetCompanyDomainForBoard(source: ExternalJobSource, boardToken: string, company: string) {
+  const normalizedToken = normalizeText(boardToken);
+  const normalizedCompany = normalizeText(company);
+
+  return (
+    getTargetCompanies().find((candidate) => {
+      if (candidate.expectedSource !== source) {
+        return false;
+      }
+
+      const candidateToken = normalizeText(candidate.careersUrl.split("/").pop() ?? "");
+      if (candidateToken && candidateToken === normalizedToken) {
+        return true;
+      }
+
+      return normalizeText(candidate.company) === normalizedCompany;
+    })?.domain ?? null
+  );
+}
+
 async function processBoardIngest({ source, boardToken }: JobsIngestPayload) {
   const metadata = getStarterBoardMetadata(source, boardToken);
   const adapter = adapters[source];
+  const existingBoard = await (prisma as any).sourceBoard.findUnique({
+    where: {
+      sourceName_boardToken: {
+        sourceName: source,
+        boardToken,
+      },
+    },
+    select: {
+      companyDomain: true,
+    },
+  });
+  const boardDomain = existingBoard?.companyDomain ?? null;
   let jobs: AggregatedJob[];
   let usJobs: AggregatedJob[];
 
@@ -120,6 +159,17 @@ async function processBoardIngest({ source, boardToken }: JobsIngestPayload) {
 
   for (const job of jobs) {
     seenSourceKeys.push(job.id);
+    const resolvedDomain =
+      companyDomain(job.companyLogoUrl) ??
+      boardDomain ??
+      metadata?.domain ??
+      targetCompanyDomainForBoard(source, boardToken, job.company) ??
+      null;
+    const resolvedLogoUrl =
+      job.companyLogoUrl ??
+      (resolvedDomain
+        ? `https://www.google.com/s2/favicons?sz=128&domain_url=${encodeURIComponent(resolvedDomain)}`
+        : null);
     await prisma.job.upsert({
       where: { sourceKey: job.id },
       create: {
@@ -129,8 +179,8 @@ async function processBoardIngest({ source, boardToken }: JobsIngestPayload) {
         boardToken: job.boardToken,
         title: job.title,
         company: job.company,
-        companyDomain: companyDomain(job.companyLogoUrl),
-        companyLogoUrl: job.companyLogoUrl,
+        companyDomain: resolvedDomain,
+        companyLogoUrl: resolvedLogoUrl,
         location: job.location,
         employmentType: job.employmentType,
         remoteType: job.workMode,
@@ -147,8 +197,8 @@ async function processBoardIngest({ source, boardToken }: JobsIngestPayload) {
       update: {
         title: job.title,
         company: job.company,
-        companyDomain: companyDomain(job.companyLogoUrl),
-        companyLogoUrl: job.companyLogoUrl,
+        companyDomain: resolvedDomain,
+        companyLogoUrl: resolvedLogoUrl,
         location: job.location,
         employmentType: job.employmentType,
         remoteType: job.workMode,
