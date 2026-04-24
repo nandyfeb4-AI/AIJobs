@@ -34,6 +34,23 @@ enum BoardSyncStatus {
   failed
 }
 
+enum CandidateCompanyStatus {
+  candidate
+  discovering
+  discovered
+  no_supported_board
+  failed
+  promoted
+}
+
+enum CandidateBoardStatus {
+  discovered
+  validating
+  validated
+  rejected
+  promoted
+}
+
 model User {
   id           String         @id @default(uuid()) @db.Uuid
   authId       String         @unique
@@ -141,6 +158,47 @@ model SourceBoard {
   updatedAt         DateTime        @updatedAt
 
   @@unique([sourceName, boardToken])
+  @@index([status, sourceName])
+}
+
+model CandidateCompany {
+  id                 String                 @id @default(uuid()) @db.Uuid
+  company            String
+  companyDomain      String?
+  homepage           String
+  careersUrl         String?
+  segments           String[]
+  sourceHint         String?
+  confidence         Float?
+  origin             String?
+  notes              String?
+  status             CandidateCompanyStatus @default(candidate)
+  lastDiscoveredAt   DateTime?
+  lastDiscoveryError String?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  candidateBoards    CandidateBoard[]
+
+  @@unique([company, homepage])
+  @@index([status, sourceHint])
+}
+
+model CandidateBoard {
+  id                 String               @id @default(uuid()) @db.Uuid
+  candidateCompanyId String               @db.Uuid
+  sourceName         String
+  boardToken         String
+  evidenceUrl        String?
+  status             CandidateBoardStatus @default(discovered)
+  validationError    String?
+  validatedAt        DateTime?
+  promotedAt         DateTime?
+  promotedBoardId    String?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  candidateCompany   CandidateCompany     @relation(fields: [candidateCompanyId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceName, boardToken, candidateCompanyId])
   @@index([status, sourceName])
 }
 

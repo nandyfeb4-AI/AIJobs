@@ -13,6 +13,7 @@ export type JobsIngestPayload = {
 
 export type BoardDiscoveryPayload = {
   companyId: string;
+  targetType?: "catalog" | "candidate";
 };
 
 export function createRedisConnection() {

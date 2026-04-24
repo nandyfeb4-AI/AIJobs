@@ -3,7 +3,7 @@ import "dotenv/config";
 import { PrismaClient, JobStatus } from "@prisma/client";
 import { QueueEvents, Worker } from "bullmq";
 import IORedis from "ioredis";
-import { compareJobsByPostedAt, isTargetRole } from "@aijobs/utils";
+import { compareJobsByPostedAt, isTargetRole, isUsRelevantJob } from "@aijobs/utils";
 import type { AggregatedJob, ExternalJobSource } from "@aijobs/types";
 
 import { AshbyAdapter } from "../../api/src/jobs/adapters/ashby.adapter";
@@ -71,9 +71,12 @@ async function processBoardIngest({ source, boardToken }: JobsIngestPayload) {
   const metadata = getStarterBoardMetadata(source, boardToken);
   const adapter = adapters[source];
   let jobs: AggregatedJob[];
+  let usJobs: AggregatedJob[];
 
   try {
-    jobs = (await adapter.fetchJobs(boardToken))
+    const fetchedJobs = await adapter.fetchJobs(boardToken);
+    usJobs = fetchedJobs.filter((job) => isUsRelevantJob(job));
+    jobs = usJobs
       .filter((job) => isTargetRole(job))
       .sort((left, right) => compareJobsByPostedAt(right, left));
   } catch (error) {
@@ -185,26 +188,28 @@ async function processBoardIngest({ source, boardToken }: JobsIngestPayload) {
     create: {
       sourceName: source,
       boardToken,
-      company: metadata?.company ?? jobs[0]?.company ?? boardToken,
-      companyDomain: metadata?.domain ?? companyDomain(jobs[0]?.companyLogoUrl) ?? null,
+      company: metadata?.company ?? usJobs[0]?.company ?? jobs[0]?.company ?? boardToken,
+      companyDomain:
+        metadata?.domain ?? companyDomain(usJobs[0]?.companyLogoUrl ?? jobs[0]?.companyLogoUrl) ?? null,
       tier: metadata?.tier ?? null,
-      status: jobs.length ? "working" : "empty",
+      status: usJobs.length ? "working" : "empty",
       lastCheckedAt: new Date(),
       lastSuccessAt: new Date(),
       lastFailureReason: null,
-      lastSeenJobCount: jobs.length,
+      lastSeenJobCount: usJobs.length,
       lastTargetJobCount: jobs.length,
       totalPersistedJobs: jobs.length,
     },
     update: {
-      company: metadata?.company ?? jobs[0]?.company ?? boardToken,
-      companyDomain: metadata?.domain ?? companyDomain(jobs[0]?.companyLogoUrl) ?? null,
+      company: metadata?.company ?? usJobs[0]?.company ?? jobs[0]?.company ?? boardToken,
+      companyDomain:
+        metadata?.domain ?? companyDomain(usJobs[0]?.companyLogoUrl ?? jobs[0]?.companyLogoUrl) ?? null,
       tier: metadata?.tier ?? null,
-      status: jobs.length ? "working" : "empty",
+      status: usJobs.length ? "working" : "empty",
       lastCheckedAt: new Date(),
       lastSuccessAt: new Date(),
       lastFailureReason: null,
-      lastSeenJobCount: jobs.length,
+      lastSeenJobCount: usJobs.length,
       lastTargetJobCount: jobs.length,
       totalPersistedJobs: jobs.length,
     },
@@ -217,14 +222,102 @@ async function processBoardIngest({ source, boardToken }: JobsIngestPayload) {
   };
 }
 
-async function processBoardDiscovery({ companyId }: BoardDiscoveryPayload) {
+async function processBoardDiscovery(
+  { companyId, targetType = "catalog" }: BoardDiscoveryPayload,
+  onProgress?: (progress: Record<string, unknown>) => Promise<void>,
+) {
+  if (targetType === "candidate") {
+    const candidateCompany = await (prisma as any).candidateCompany.findUnique({
+      where: { id: companyId },
+    });
+
+    if (!candidateCompany) {
+      throw new Error(`Unknown candidate discovery target: ${companyId}`);
+    }
+
+    await (prisma as any).candidateCompany.update({
+      where: { id: candidateCompany.id },
+      data: {
+        status: "discovering",
+        lastDiscoveryError: null,
+      },
+    });
+
+    const company = {
+      id: candidateCompany.id,
+      company: candidateCompany.company,
+      domain: candidateCompany.companyDomain ?? new URL(candidateCompany.homepage).hostname.replace(/^www\./i, ""),
+      homepage: candidateCompany.homepage,
+      careersUrl: candidateCompany.careersUrl ?? candidateCompany.homepage,
+      segments: candidateCompany.segments ?? [],
+      priorityTier: "P2" as const,
+      expectedSource: (candidateCompany.sourceHint ?? "greenhouse") as ExternalJobSource,
+    };
+
+    const result = await discoverBoardsForCompany(company, async (progress) => {
+      await onProgress?.({
+        ...progress,
+        company: company.company,
+      });
+    });
+
+    for (const board of result.discovered) {
+      await (prisma as any).candidateBoard.upsert({
+        where: {
+          sourceName_boardToken_candidateCompanyId: {
+            sourceName: board.source,
+            boardToken: board.boardToken,
+            candidateCompanyId: candidateCompany.id,
+          },
+        },
+        create: {
+          candidateCompanyId: candidateCompany.id,
+          sourceName: board.source,
+          boardToken: board.boardToken,
+          evidenceUrl: board.evidenceUrl,
+          status: "discovered",
+        },
+        update: {
+          evidenceUrl: board.evidenceUrl,
+          status: "discovered",
+          validationError: null,
+        },
+      });
+    }
+
+    await (prisma as any).candidateCompany.update({
+      where: { id: candidateCompany.id },
+      data: {
+        status: result.discovered.length > 0 ? "discovered" : "no_supported_board",
+        lastDiscoveredAt: new Date(),
+        lastDiscoveryError:
+          result.discovered.length === 0 && result.errors.length > 0
+            ? result.errors.map((error) => `${error.url}: ${error.message}`).slice(0, 3).join(" | ")
+            : null,
+      },
+    });
+
+    return {
+      companyId,
+      discovered: result.discovered.length,
+      boards: result.discovered,
+      errors: result.errors,
+      targetType,
+    };
+  }
+
   const company = getTargetCompanyById(companyId);
 
   if (!company) {
     throw new Error(`Unknown discovery target: ${companyId}`);
   }
 
-  const result = await discoverBoardsForCompany(company);
+  const result = await discoverBoardsForCompany(company, async (progress) => {
+    await onProgress?.({
+      ...progress,
+      company: company.company,
+    });
+  });
 
   for (const board of result.discovered) {
     const existing = await (prisma as any).sourceBoard.findUnique({
@@ -269,6 +362,7 @@ async function processBoardDiscovery({ companyId }: BoardDiscoveryPayload) {
     discovered: result.discovered.length,
     boards: result.discovered,
     errors: result.errors,
+    targetType,
   };
 }
 
@@ -280,7 +374,19 @@ void discoveryQueueEvents.waitUntilReady();
 const worker = new Worker<JobsIngestPayload>(
   JOBS_INGEST_QUEUE,
   async (job) => {
+    await job.updateProgress({
+      stage: "fetching_board",
+      message: `Fetching ${job.data.source}/${job.data.boardToken}`,
+    });
+
     const result = await processBoardIngest(job.data);
+    await job.updateProgress({
+      stage: "completed",
+      message: `Persisted ${result.persisted} jobs for ${result.source}/${result.boardToken}`,
+      persisted: result.persisted,
+      source: result.source,
+      boardToken: result.boardToken,
+    });
     console.log(`[worker] ingested ${result.persisted} jobs for ${result.source}/${result.boardToken}`);
     return result;
   },
@@ -290,7 +396,25 @@ const worker = new Worker<JobsIngestPayload>(
 const discoveryWorker = new Worker<BoardDiscoveryPayload>(
   BOARD_DISCOVERY_QUEUE,
   async (job) => {
-    const result = await processBoardDiscovery(job.data);
+    await job.updateProgress({
+      stage: "starting",
+      message: `Preparing discovery for ${job.data.companyId}`,
+    });
+
+    const result = await processBoardDiscovery(job.data, async (progress) => {
+      await job.updateProgress(progress);
+    });
+
+    await job.updateProgress({
+      stage: "completed",
+      message:
+        result.discovered === 0
+          ? "No new board candidates found"
+          : `Found ${result.discovered} new board candidate${result.discovered === 1 ? "" : "s"}`,
+      companyId: result.companyId,
+      discoveredBoards: result.discovered,
+      errors: result.errors.length,
+    });
     console.log(
       `[worker] discovered ${result.discovered} board candidates for ${result.companyId}`,
     );

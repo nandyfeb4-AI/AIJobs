@@ -21,8 +21,77 @@ type SourceBoard = {
   lastSeenJobCount: number | null;
   lastTargetJobCount: number | null;
   totalPersistedJobs: number;
-  createdAt: string;
-  updatedAt: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+type PipelineJob = {
+  id: string;
+  name: string;
+  state: string;
+  data: {
+    companyId?: string;
+    source?: AtsSource;
+    boardToken?: string;
+  };
+  progress:
+    | {
+        stage?: string;
+        message?: string;
+        company?: string;
+        currentUrl?: string;
+        checkedUrls?: number;
+        totalUrls?: number;
+        discoveredBoards?: number;
+        persisted?: number;
+      }
+    | number
+    | null;
+  failedReason: string | null;
+  returnValue:
+    | {
+        companyId?: string;
+        discovered?: number;
+        persisted?: number;
+      }
+    | null;
+  attemptsMade: number;
+  processedOn: number | null;
+  finishedOn: number | null;
+  timestamp: number | null;
+};
+
+type QueueSnapshot = {
+  counts: {
+    waiting: number;
+    active: number;
+    completed: number;
+    failed: number;
+    delayed: number;
+    paused: number;
+  };
+  trackedCounts: {
+    total: number;
+    waiting: number;
+    active: number;
+    completed: number;
+    failed: number;
+  };
+  hasActiveWork: boolean;
+  trackedJobs: PipelineJob[];
+  recentJobs: PipelineJob[];
+};
+
+type PipelineSnapshot = {
+  discovery: QueueSnapshot;
+  ingest: QueueSnapshot;
+};
+
+type ActionResponse = {
+  enqueued: number;
+  targetCompanies?: number;
+  candidates?: number;
+  jobs?: Array<{ id: string }>;
 };
 
 function apiBase() {
@@ -44,6 +113,19 @@ function formatRelativeish(timestamp?: string | null) {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
+  });
+}
+
+function formatJobTimestamp(value?: number | null) {
+  if (!value) return "Not started";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+
+  return date.toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
   });
 }
 
@@ -76,10 +158,98 @@ function statusTone(status: BoardStatus) {
   }
 }
 
+function pipelineStateTone(state: string) {
+  switch (state) {
+    case "completed":
+      return {
+        bg: "rgba(37,104,73,0.08)",
+        color: "#256849",
+        label: "Completed",
+      };
+    case "failed":
+      return {
+        bg: "rgba(190,24,93,0.08)",
+        color: "#be185d",
+        label: "Failed",
+      };
+    case "active":
+      return {
+        bg: "rgba(201,100,40,0.08)",
+        color: "#c96428",
+        label: "Active",
+      };
+    default:
+      return {
+        bg: "rgba(26,32,24,0.06)",
+        color: "#5a6455",
+        label: "Queued",
+      };
+  }
+}
+
+function trackedLabel(job: PipelineJob, kind: "discover" | "ingest") {
+  if (kind === "discover") {
+    return job.progress && typeof job.progress !== "number" && job.progress.company
+      ? job.progress.company
+      : job.data.companyId ?? job.name;
+  }
+
+  if (job.data.source && job.data.boardToken) {
+    return `${formatSource(job.data.source)} / ${job.data.boardToken}`;
+  }
+
+  return job.name;
+}
+
+function progressMessage(job: PipelineJob, kind: "discover" | "ingest") {
+  if (job.progress && typeof job.progress !== "number") {
+    if (kind === "discover" && job.progress.checkedUrls && job.progress.totalUrls) {
+      return `${job.progress.message ?? "Running"} · ${job.progress.checkedUrls}/${job.progress.totalUrls} pages checked`;
+    }
+
+    if (job.progress.message) {
+      return job.progress.message;
+    }
+  }
+
+  if (job.state === "completed") {
+    if (kind === "discover") {
+      return `${job.returnValue?.discovered ?? 0} board candidates discovered`;
+    }
+
+    return `${job.returnValue?.persisted ?? 0} jobs persisted`;
+  }
+
+  if (job.failedReason) {
+    return job.failedReason;
+  }
+
+  return kind === "discover" ? "Waiting to start discovery" : "Waiting to start ingest";
+}
+
+function discoveryFoundCount(job: PipelineJob) {
+  if (typeof job.returnValue?.discovered === "number") {
+    return job.returnValue.discovered;
+  }
+
+  if (job.progress && typeof job.progress !== "number" && typeof job.progress.discoveredBoards === "number") {
+    return job.progress.discoveredBoards;
+  }
+
+  return 0;
+}
+
+function isCurrentRunJob(job: PipelineJob) {
+  return ["waiting", "active", "failed", "completed"].includes(job.state);
+}
+
 export function BoardCoverageShell() {
   const [boards, setBoards] = useState<SourceBoard[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pipeline, setPipeline] = useState<PipelineSnapshot | null>(null);
+  const [trackedDiscoveryJobIds, setTrackedDiscoveryJobIds] = useState<string[]>([]);
+  const [trackedVerifyJobIds, setTrackedVerifyJobIds] = useState<string[]>([]);
   const [actionState, setActionState] = useState<{
     kind: "discover" | "verify" | null;
     pending: boolean;
@@ -90,9 +260,11 @@ export function BoardCoverageShell() {
     message: null,
   });
 
-  async function loadBoards(cancelled = false) {
+  async function loadBoards(cancelled = false, silent = false) {
     try {
-      setLoading(true);
+      if (!silent) {
+        setLoading(true);
+      }
       setError(null);
 
       const response = await fetch(`${apiBase()}/jobs/boards`, {
@@ -111,11 +283,45 @@ export function BoardCoverageShell() {
     } catch (nextError) {
       if (!cancelled) {
         setError(nextError instanceof Error ? nextError.message : "Unknown error");
-        setBoards([]);
+        if (!silent) {
+          setBoards([]);
+        }
       }
     } finally {
-      if (!cancelled) {
+      if (!cancelled && !silent) {
         setLoading(false);
+      }
+    }
+  }
+
+  async function loadPipeline(cancelled = false) {
+    try {
+      const url = new URL(`${apiBase()}/jobs/pipeline`);
+
+      if (trackedDiscoveryJobIds.length) {
+        url.searchParams.set("discoveryJobIds", trackedDiscoveryJobIds.join(","));
+      }
+
+      if (trackedVerifyJobIds.length) {
+        url.searchParams.set("ingestJobIds", trackedVerifyJobIds.join(","));
+      }
+
+      const response = await fetch(url.toString(), {
+        cache: "no-store",
+      });
+
+      if (!response.ok) {
+        throw new Error(`Pipeline request failed with ${response.status}`);
+      }
+
+      const payload = (await response.json()) as PipelineSnapshot;
+
+      if (!cancelled) {
+        setPipeline(payload);
+      }
+    } catch {
+      if (!cancelled) {
+        setPipeline(null);
       }
     }
   }
@@ -123,10 +329,18 @@ export function BoardCoverageShell() {
   useEffect(() => {
     let cancelled = false;
     void loadBoards(cancelled);
+    void loadPipeline(cancelled);
+
+    const interval = window.setInterval(() => {
+      void loadPipeline(cancelled);
+      void loadBoards(cancelled, true);
+    }, 4000);
+
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
     };
-  }, []);
+  }, [trackedDiscoveryJobIds, trackedVerifyJobIds]);
 
   const sourceCards = useMemo(() => {
     const grouped = new Map<AtsSource, SourceBoard[]>();
@@ -175,10 +389,15 @@ export function BoardCoverageShell() {
 
   async function runAction(kind: "discover" | "verify", endpoint: string) {
     try {
+      const startingMessage =
+        kind === "discover"
+          ? "Starting discovery run..."
+          : "Starting verification run...";
+
       setActionState({
         kind,
         pending: true,
-        message: null,
+        message: startingMessage,
       });
 
       const response = await fetch(`${apiBase()}${endpoint}`, {
@@ -189,11 +408,18 @@ export function BoardCoverageShell() {
         throw new Error(`Request failed with ${response.status}`);
       }
 
-      const payload = (await response.json()) as Record<string, number>;
+      const payload = (await response.json()) as ActionResponse;
+      const enqueuedJobIds = (payload.jobs ?? []).map((job) => job.id);
       const message =
         kind === "discover"
           ? `Discovery queued for ${payload.targetCompanies ?? payload.enqueued ?? 0} target companies.`
           : `Verification queued for ${payload.candidates ?? payload.enqueued ?? 0} unverified boards.`;
+
+      if (kind === "discover") {
+        setTrackedDiscoveryJobIds(enqueuedJobIds);
+      } else {
+        setTrackedVerifyJobIds(enqueuedJobIds);
+      }
 
       setActionState({
         kind,
@@ -201,7 +427,7 @@ export function BoardCoverageShell() {
         message,
       });
 
-      await loadBoards();
+      await Promise.all([loadBoards(false, true), loadPipeline()]);
     } catch (nextError) {
       setActionState({
         kind,
@@ -233,26 +459,72 @@ export function BoardCoverageShell() {
               <button
                 type="button"
                 onClick={() => void runAction("discover", "/jobs/discover")}
-                disabled={actionState.pending}
-                className="inline-flex items-center rounded-full bg-[#1a2018] px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+                aria-busy={actionState.pending && actionState.kind === "discover"}
+                disabled={actionState.pending && actionState.kind === "discover"}
+                className="inline-flex min-w-[164px] items-center justify-center rounded-full bg-[#1a2018] px-4 py-2 text-sm font-medium text-white transition-all hover:bg-[#242b21] active:scale-[0.99] disabled:cursor-wait disabled:opacity-70"
               >
-                {actionState.pending && actionState.kind === "discover" ? "Finding Boards..." : "Find New Boards"}
+                {actionState.pending && actionState.kind === "discover" ? (
+                  <span className="inline-flex items-center gap-2">
+                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                    Finding Boards...
+                  </span>
+                ) : (
+                  "Find New Boards"
+                )}
               </button>
               <button
                 type="button"
                 onClick={() => void runAction("verify", "/jobs/verify-unverified")}
-                disabled={actionState.pending || unverifiedCount === 0}
-                className="inline-flex items-center rounded-full border border-line px-4 py-2 text-sm font-medium text-ink disabled:opacity-60"
+                aria-busy={actionState.pending && actionState.kind === "verify"}
+                disabled={(actionState.pending && actionState.kind === "verify") || unverifiedCount === 0}
+                className="inline-flex min-w-[184px] items-center justify-center rounded-full border border-line px-4 py-2 text-sm font-medium text-ink transition-all hover:bg-parchment active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {actionState.pending && actionState.kind === "verify"
-                  ? "Queueing Verification..."
+                  ? (
+                    <span className="inline-flex items-center gap-2">
+                      <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-ink/20 border-t-ink" />
+                      Queueing Verification...
+                    </span>
+                  )
                   : `Verify Unverified (${unverifiedCount})`}
               </button>
             </div>
           </div>
           {actionState.message ? (
-            <p className="text-xs text-sage mt-3">{actionState.message}</p>
+            <p className="text-xs text-sage mt-3" aria-live="polite">{actionState.message}</p>
           ) : null}
+        </section>
+
+        <section className="bg-card rounded-2xl p-5 shadow-[0_2px_12px_rgba(26,32,24,0.06)]">
+          <div className="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <h2 className="text-ink text-sm font-semibold tracking-tight">Live Worker Pipeline</h2>
+              <p className="text-sage text-xs mt-1 leading-6">
+                Polling the BullMQ queues every few seconds so you can see discovery and verification
+                progress without checking logs.
+              </p>
+            </div>
+            <span className="rounded-full bg-parchment px-3 py-1 text-[11px] text-sage">
+              Refreshing every 4s
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <PipelineCard
+              title="Discovery Queue"
+              description="Company-level scouting jobs from Find New Boards."
+              snapshot={pipeline?.discovery ?? null}
+              trackedJobIds={trackedDiscoveryJobIds}
+              kind="discover"
+            />
+            <PipelineCard
+              title="Verification Queue"
+              description="Board verification and ingest jobs for unverified boards."
+              snapshot={pipeline?.ingest ?? null}
+              trackedJobIds={trackedVerifyJobIds}
+              kind="ingest"
+            />
+          </div>
         </section>
 
         <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -357,6 +629,142 @@ export function BoardCoverageShell() {
   );
 }
 
+function PipelineCard({
+  title,
+  description,
+  snapshot,
+  trackedJobIds,
+  kind,
+}: {
+  title: string;
+  description: string;
+  snapshot: QueueSnapshot | null;
+  trackedJobIds: string[];
+  kind: "discover" | "ingest";
+}) {
+  const trackedJobs = snapshot?.trackedJobs ?? [];
+  const jobs =
+    kind === "discover"
+      ? trackedJobs.filter((job) => {
+          const found = discoveryFoundCount(job);
+          return found > 0 || job.state === "active" || job.state === "waiting" || job.state === "failed";
+        })
+      : trackedJobs.filter(isCurrentRunJob);
+  const runSummary =
+    kind === "discover"
+      ? {
+          total: trackedJobs.length,
+          running: trackedJobs.filter((job) => job.state === "active" || job.state === "waiting").length,
+          completed: trackedJobs.filter((job) => job.state === "completed").length,
+          found: trackedJobs.reduce((sum, job) => sum + discoveryFoundCount(job), 0),
+          failed: trackedJobs.filter((job) => job.state === "failed").length,
+        }
+      : null;
+
+  return (
+    <section className="rounded-2xl border border-line bg-white px-5 py-5">
+      <div className="flex items-start justify-between gap-3 mb-4">
+        <div>
+          <h3 className="text-ink text-sm font-semibold tracking-tight">{title}</h3>
+          <p className="text-sage text-xs mt-1 leading-5">{description}</p>
+        </div>
+        <span
+          className="rounded-full px-2.5 py-1 text-[11px]"
+          style={{
+            background:
+              trackedJobIds.length > 0 && snapshot?.hasActiveWork
+                ? "rgba(201,100,40,0.08)"
+                : "rgba(26,32,24,0.06)",
+            color:
+              trackedJobIds.length > 0 && snapshot?.hasActiveWork
+                ? "#c96428"
+                : "#5a6455",
+          }}
+        >
+          {trackedJobIds.length > 0 ? (snapshot?.hasActiveWork ? "Current Run Active" : "Current Run Complete") : "No Active Run"}
+        </span>
+      </div>
+
+      <p className="text-[11px] uppercase tracking-[0.14em] text-sage mb-3">Queue Totals</p>
+      <div className="grid grid-cols-4 gap-2 mb-4">
+        <MetricPill label="Waiting" value={snapshot?.counts.waiting ?? 0} tone="neutral" />
+        <MetricPill label="Active" value={snapshot?.counts.active ?? 0} tone="warning" />
+        <MetricPill label="Done" value={snapshot?.counts.completed ?? 0} tone="positive" />
+        <MetricPill label="Failed" value={snapshot?.counts.failed ?? 0} tone="danger" />
+      </div>
+
+      {trackedJobIds.length > 0 ? (
+        <div className="mb-3">
+          <p className="text-[11px] uppercase tracking-[0.14em] text-sage">
+            Current Run
+          </p>
+          <p className="text-xs text-sage mt-1 leading-5">
+            Tracking {trackedJobIds.length} latest job{trackedJobIds.length === 1 ? "" : "s"} from the most recent action.
+            {runSummary
+              ? ` ${runSummary.completed}/${runSummary.total} completed, ${runSummary.running} still running, ${runSummary.failed} failed, ${runSummary.found} new board candidate${runSummary.found === 1 ? "" : "s"} found.`
+              : ""}
+          </p>
+        </div>
+      ) : (
+        <div className="mb-3">
+          <p className="text-[11px] uppercase tracking-[0.14em] text-sage">Current Run</p>
+          <p className="text-xs text-sage mt-1 leading-5">
+            No current run selected yet. Start a new discovery or verification run to see only fresh results here.
+          </p>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {trackedJobIds.length === 0 ? (
+          <p className="text-xs text-sage leading-6">
+            Old queue history is intentionally hidden here. This section now shows only the current run.
+          </p>
+        ) : jobs.length ? (
+          jobs.map((job) => {
+            const tone = pipelineStateTone(job.state);
+
+            return (
+              <article key={job.id} className="rounded-xl border border-line bg-card px-4 py-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-ink">{trackedLabel(job, kind)}</p>
+                    <p className="text-xs text-sage mt-1 leading-5">{progressMessage(job, kind)}</p>
+                    {kind === "discover" ? (
+                      <p className="text-xs text-sage/80 mt-1">
+                        {discoveryFoundCount(job) === 0
+                          ? "No new boards found yet"
+                          : `${discoveryFoundCount(job)} new board candidate${discoveryFoundCount(job) === 1 ? "" : "s"} found`}
+                      </p>
+                    ) : null}
+                  </div>
+                  <span
+                    className="inline-flex rounded-full px-2.5 py-1 text-[11px] font-medium"
+                    style={{ background: tone.bg, color: tone.color }}
+                  >
+                    {tone.label}
+                  </span>
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-[11px] text-sage">
+                  <span>Queued: {formatJobTimestamp(job.timestamp)}</span>
+                  <span>Started: {formatJobTimestamp(job.processedOn)}</span>
+                  <span>Finished: {formatJobTimestamp(job.finishedOn)}</span>
+                </div>
+              </article>
+            );
+          })
+        ) : (
+          <p className="text-xs text-sage leading-6">
+            {kind === "discover"
+              ? "This run has not identified any new boards yet. Completed jobs with 0 discoveries are hidden to keep the panel focused on new findings."
+              : "No boards from the current verification run are being shown yet."}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function MetricPill({
   label,
   value,
@@ -364,12 +772,13 @@ function MetricPill({
 }: {
   label: string;
   value: number;
-  tone: "positive" | "warning" | "danger";
+  tone: "positive" | "warning" | "danger" | "neutral";
 }) {
   const colorMap = {
     positive: { bg: "rgba(37,104,73,0.08)", color: "#256849" },
     warning: { bg: "rgba(201,100,40,0.08)", color: "#c96428" },
     danger: { bg: "rgba(190,24,93,0.08)", color: "#be185d" },
+    neutral: { bg: "rgba(26,32,24,0.06)", color: "#5a6455" },
   } as const;
 
   const colors = colorMap[tone];

@@ -8,6 +8,22 @@ type DiscoveredBoard = {
   evidenceUrl: string;
 };
 
+export type BoardDiscoveryProgress = {
+  stage:
+    | "starting"
+    | "probing_expected_board"
+    | "fetching_page"
+    | "boards_detected"
+    | "completed";
+  message: string;
+  checkedUrls: number;
+  totalUrls: number;
+  currentUrl?: string;
+  discoveredBoards: number;
+};
+
+const DISCOVERY_FETCH_TIMEOUT_MS = 8000;
+
 const ATS_PATTERNS: Array<{
   source: ExternalJobSource;
   pattern: RegExp;
@@ -56,7 +72,7 @@ function normalizeToken(source: ExternalJobSource, token: string) {
   return token.trim();
 }
 
-function extractBoards(text: string, evidenceUrl: string) {
+export function extractBoardsFromText(text: string, evidenceUrl: string) {
   const boards = new Map<string, DiscoveredBoard>();
 
   for (const item of ATS_PATTERNS) {
@@ -85,39 +101,166 @@ function extractBoards(text: string, evidenceUrl: string) {
 }
 
 async function fetchHtml(url: string) {
-  const response = await fetch(url, {
-    redirect: "follow",
-    headers: {
-      "user-agent":
-        "Mozilla/5.0 (compatible; AIJobsDiscoveryBot/0.1; +https://aijobs.local/discovery)",
-    },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DISCOVERY_FETCH_TIMEOUT_MS);
 
-  if (!response.ok) {
-    throw new Error(`Discovery request failed with ${response.status}`);
+  try {
+    const response = await fetch(url, {
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (compatible; AIJobsDiscoveryBot/0.1; +https://aijobs.local/discovery)",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Discovery request failed with ${response.status}`);
+    }
+
+    const finalUrl = response.url;
+    const html = await response.text();
+
+    return {
+      url: finalUrl,
+      html,
+    };
+  } finally {
+    clearTimeout(timeout);
   }
-
-  const finalUrl = response.url;
-  const html = await response.text();
-
-  return {
-    url: finalUrl,
-    html,
-  };
 }
 
-export async function discoverBoardsForCompany(company: TargetCompany) {
-  const checkedUrls = new Set<string>([company.careersUrl, ...commonCareerPaths(company.homepage)]);
+async function probeBoardCandidate(candidate: DiscoveredBoard) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DISCOVERY_FETCH_TIMEOUT_MS);
+
+  try {
+    let response: Response;
+
+    switch (candidate.source) {
+      case "greenhouse":
+        response = await fetch(
+          `https://boards-api.greenhouse.io/v1/boards/${candidate.boardToken}`,
+          {
+            redirect: "follow",
+            signal: controller.signal,
+          },
+        );
+        break;
+      case "lever":
+        response = await fetch(
+          `https://api.lever.co/v0/postings/${candidate.boardToken}?mode=json`,
+          {
+            redirect: "follow",
+            signal: controller.signal,
+          },
+        );
+        break;
+      case "ashby":
+        response = await fetch(
+          `https://api.ashbyhq.com/posting-api/job-board/${candidate.boardToken}`,
+          {
+            redirect: "follow",
+            signal: controller.signal,
+          },
+        );
+        break;
+      default:
+        return false;
+    }
+
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function discoverBoardsForCompany(
+  company: TargetCompany,
+  onProgress?: (progress: BoardDiscoveryProgress) => Promise<void> | void,
+) {
+  const checkedUrls = Array.from(
+    new Set<string>([company.careersUrl, ...commonCareerPaths(company.homepage)]),
+  );
   const discovered = new Map<string, DiscoveredBoard>();
   const errors: Array<{ url: string; message: string }> = [];
 
-  for (const url of checkedUrls) {
+  await onProgress?.({
+    stage: "starting",
+    message: `Preparing discovery for ${company.company}`,
+    checkedUrls: 0,
+    totalUrls: checkedUrls.length,
+    discoveredBoards: 0,
+  });
+
+  const directCandidates = extractBoardsFromText(company.careersUrl, company.careersUrl).filter(
+    (candidate) => candidate.source === company.expectedSource,
+  );
+
+  if (directCandidates.length) {
+    await onProgress?.({
+      stage: "probing_expected_board",
+      message: `Validating expected ${company.expectedSource} board from careers URL`,
+      checkedUrls: 0,
+      totalUrls: checkedUrls.length,
+      currentUrl: company.careersUrl,
+      discoveredBoards: 0,
+    });
+
+    for (const candidate of directCandidates) {
+      const isValid = await probeBoardCandidate(candidate);
+      if (!isValid) continue;
+
+      discovered.set(`${candidate.source}:${candidate.boardToken}`, candidate);
+    }
+
+    if (discovered.size > 0) {
+      await onProgress?.({
+        stage: "completed",
+        message: `Validated ${discovered.size} board candidate${discovered.size === 1 ? "" : "s"} from the expected ATS URL`,
+        checkedUrls: 1,
+        totalUrls: checkedUrls.length,
+        currentUrl: company.careersUrl,
+        discoveredBoards: discovered.size,
+      });
+
+      return {
+        company,
+        discovered: Array.from(discovered.values()),
+        errors,
+      };
+    }
+  }
+
+  for (const [index, url] of checkedUrls.entries()) {
+    await onProgress?.({
+      stage: "fetching_page",
+      message: `Checking ${url}`,
+      checkedUrls: index,
+      totalUrls: checkedUrls.length,
+      currentUrl: url,
+      discoveredBoards: discovered.size,
+    });
+
     try {
       const page = await fetchHtml(url);
-      const matches = extractBoards(`${page.url}\n${page.html}`, page.url);
+      const matches = extractBoardsFromText(`${page.url}\n${page.html}`, page.url);
 
       for (const match of matches) {
         discovered.set(`${match.source}:${match.boardToken}`, match);
+      }
+
+      if (matches.length > 0) {
+        await onProgress?.({
+          stage: "boards_detected",
+          message: `Found ${matches.length} board candidate${matches.length === 1 ? "" : "s"} on ${page.url}`,
+          checkedUrls: index + 1,
+          totalUrls: checkedUrls.length,
+          currentUrl: page.url,
+          discoveredBoards: discovered.size,
+        });
       }
 
       if (matches.length > 0) {
@@ -130,6 +273,14 @@ export async function discoverBoardsForCompany(company: TargetCompany) {
       });
     }
   }
+
+  await onProgress?.({
+    stage: "completed",
+    message: `Discovery finished for ${company.company}`,
+    checkedUrls: checkedUrls.length,
+    totalUrls: checkedUrls.length,
+    discoveredBoards: discovered.size,
+  });
 
   return {
     company,

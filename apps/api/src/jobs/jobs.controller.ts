@@ -1,7 +1,14 @@
-import { Controller, Get, Inject, Post, Query } from "@nestjs/common";
+import { Body, Controller, Get, Inject, Post, Query } from "@nestjs/common";
 
 import type { ExternalJobSource } from "@aijobs/types";
 
+import {
+  CandidateBoardSourceDto,
+  CandidateBootstrapDto,
+  CandidateEnrichDto,
+  CandidateSourceDto,
+  UpsertCandidateCompaniesDto,
+} from "./jobs.dto";
 import { JobsQueueService } from "./jobs-queue.service";
 import { JobsService } from "./jobs.service";
 
@@ -64,6 +71,89 @@ export class JobsController {
     };
   }
 
+  @Get("candidate-companies")
+  async candidateCompanies() {
+    return this.jobsService.listCandidateCompanies();
+  }
+
+  @Get("candidate-seed-groups")
+  async candidateSeedGroups() {
+    return this.jobsService.listCandidateSeedGroups();
+  }
+
+  @Post("candidate-companies/bootstrap")
+  async bootstrapCandidateCompanies(
+    @Body() body: CandidateBootstrapDto,
+  ) {
+    return this.jobsService.bootstrapCandidateCompanies(body.groupId);
+  }
+
+  @Post("candidate-companies/source")
+  async sourceCandidateCompanies(
+    @Body() body: CandidateSourceDto,
+  ) {
+    return this.jobsService.sourceCandidateCompanies({
+      tier: body.tier,
+      limit: body.limit,
+      focusAreas: body.focusAreas,
+      customQuery: body.customQuery,
+    });
+  }
+
+  @Post("candidate-companies")
+  async upsertCandidateCompanies(
+    @Body() body: UpsertCandidateCompaniesDto,
+  ) {
+    return this.jobsService.upsertCandidateCompanies(body.companies);
+  }
+
+  @Post("candidate-companies/enrich")
+  async enrichCandidateCompanies(
+    @Body() body: CandidateEnrichDto,
+  ) {
+    return this.jobsService.enrichCandidateCompanies(body.limit);
+  }
+
+  @Post("candidate-discover")
+  async candidateDiscover() {
+    const targets = await this.jobsService.getCandidateDiscoveryTargets();
+    const jobs = await this.jobsQueueService.enqueueBoardDiscoveries(
+      targets.map((company: { id: string }) => ({ companyId: company.id, targetType: "candidate" })),
+    );
+
+    return {
+      candidateCompanies: targets.length,
+      enqueued: jobs.length,
+      jobs,
+    };
+  }
+
+  @Get("candidate-boards")
+  async candidateBoards() {
+    return this.jobsService.listCandidateBoards();
+  }
+
+  @Post("candidate-boards/validate")
+  async validateCandidateBoards() {
+    return this.jobsService.validateCandidateBoards();
+  }
+
+  @Post("candidate-boards/source")
+  async sourceCandidateBoards(
+    @Body() body: CandidateBoardSourceDto,
+  ) {
+    return this.jobsService.sourceCandidateBoards({
+      limit: body.limit,
+      focusAreas: body.focusAreas,
+      customQuery: body.customQuery,
+    });
+  }
+
+  @Post("candidate-boards/promote")
+  async promoteCandidateBoards() {
+    return this.jobsService.promoteValidatedCandidateBoards();
+  }
+
   @Post("verify-unverified")
   async verifyUnverified(
     @Query("source") source?: ExternalJobSource,
@@ -87,6 +177,23 @@ export class JobsController {
     }
 
     return this.jobsQueueService.getJobStatus(jobId);
+  }
+
+  @Get("pipeline")
+  async pipeline(
+    @Query("discoveryJobIds") discoveryJobIds?: string,
+    @Query("ingestJobIds") ingestJobIds?: string,
+  ) {
+    return this.jobsQueueService.getPipelineSnapshot({
+      discoveryJobIds: discoveryJobIds
+        ?.split(",")
+        .map((jobId) => jobId.trim())
+        .filter(Boolean),
+      ingestJobIds: ingestJobIds
+        ?.split(",")
+        .map((jobId) => jobId.trim())
+        .filter(Boolean),
+    });
   }
 
   @Get("feed")
