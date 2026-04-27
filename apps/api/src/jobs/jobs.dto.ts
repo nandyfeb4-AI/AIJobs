@@ -1,6 +1,7 @@
 import { Type } from "class-transformer";
 import {
   IsArray,
+  IsBoolean,
   IsInt,
   IsNumber,
   IsOptional,
@@ -68,8 +69,28 @@ export class CandidateEnrichDto {
   @IsOptional()
   @IsInt()
   @Min(1)
-  @Max(100)
+  @Max(200)
   limit?: number;
+}
+
+export class CandidateDiscoverDto {
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  limit?: number;
+}
+
+export class CandidatePipelineDto {
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  limit?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  includeNoSupported?: boolean;
 }
 
 export class CandidateSourceDto {

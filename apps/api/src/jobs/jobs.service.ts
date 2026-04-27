@@ -19,10 +19,18 @@ import type { AggregateJobsResult, SourceAdapter } from "./jobs.types";
 import { PrismaService } from "../prisma/prisma.service";
 
 type CandidateSourceTier = "top" | "priority" | "growth";
+type CandidateEvidenceKind = "api_url" | "job_posting_url" | "board_root_url" | "unknown";
+type CandidateEvidenceSource = "direct_search" | "openai_citation" | "openai_text";
 type CandidateBoardInput = {
   source: ExternalJobSource;
   boardToken: string;
   evidenceUrl: string;
+  evidenceKind?: CandidateEvidenceKind;
+  evidenceSource?: CandidateEvidenceSource;
+};
+type SourceUrlEvidence = {
+  url: string;
+  evidenceSource: CandidateEvidenceSource;
 };
 
 const BOARD_FIRST_SOURCES: Array<Exclude<ExternalJobSource, "adzuna">> = [
@@ -30,18 +38,28 @@ const BOARD_FIRST_SOURCES: Array<Exclude<ExternalJobSource, "adzuna">> = [
   "lever",
   "ashby",
 ];
+const BOARD_REJECTION_COOLDOWN_DAYS = 14;
 
 const DEFAULT_CANDIDATE_FOCUS_AREAS = [
   "software engineering",
+  "data",
   "product",
-  "design",
   "qa",
+  "cloud infrastructure",
+  "security",
+  "it support",
+  "business systems",
+  "erp crm",
+  "design",
 ];
 
 @Injectable()
 export class JobsService {
   private readonly adapters: Record<ExternalJobSource, SourceAdapter>;
   private readonly openaiClient: OpenAI | null;
+  private readonly openaiBoardFallbackEnabled: boolean;
+  private readonly openaiCompanySourcingEnabled: boolean;
+  private readonly openaiCompanyEnrichmentEnabled: boolean;
 
   constructor(
     @Inject(ConfigService) private readonly configService: ConfigService,
@@ -64,6 +82,11 @@ export class JobsService {
 
     const openAiApiKey = this.configService.get<string>("OPENAI_API_KEY");
     this.openaiClient = openAiApiKey ? new OpenAI({ apiKey: openAiApiKey }) : null;
+    this.openaiBoardFallbackEnabled = this.configService.get<string>("ENABLE_OPENAI_BOARD_FALLBACK") === "true";
+    this.openaiCompanySourcingEnabled =
+      this.configService.get<string>("ENABLE_OPENAI_COMPANY_SOURCING") === "true";
+    this.openaiCompanyEnrichmentEnabled =
+      this.configService.get<string>("ENABLE_OPENAI_COMPANY_ENRICHMENT") === "true";
   }
 
   listConfiguredSources() {
@@ -94,8 +117,10 @@ export class JobsService {
     focusAreas?: string[];
     customQuery?: string;
   }) {
-    if (!this.openaiClient) {
-      throw new Error("OPENAI_API_KEY is required for automated candidate sourcing.");
+    if (!this.openaiClient || !this.openaiCompanySourcingEnabled) {
+      throw new Error(
+        "OpenAI company sourcing is disabled. Set ENABLE_OPENAI_COMPANY_SOURCING=true with OPENAI_API_KEY to use it.",
+      );
     }
 
     const tier = input?.tier ?? "top";
@@ -201,6 +226,50 @@ export class JobsService {
       focusAreas,
       customQuery: input?.customQuery,
     });
+    let discoveredBoards = discoveredBySource.flatMap((entry) => entry.candidates);
+    let { kept: dedupedCandidates, skipped: skippedDuplicateBoards } =
+      await this.filterNewBoardCandidates(discoveredBoards);
+    const backfillRounds: Array<Record<string, unknown>> = [];
+
+    if (this.openaiBoardFallbackEnabled && this.openaiClient && dedupedCandidates.length < limit) {
+      for (let round = 1; round <= 2 && dedupedCandidates.length < limit; round += 1) {
+        const backfillBySource = await this.harvestBackfillBoardCandidates({
+          round,
+          limitsBySource,
+          focusAreas,
+          customQuery: input?.customQuery,
+          knownCandidates: discoveredBoards,
+          keptCandidates: dedupedCandidates,
+        });
+        const backfillCandidates = backfillBySource.flatMap((entry) => entry.candidates);
+
+        if (!backfillCandidates.length) {
+          break;
+        }
+
+        for (const entry of backfillBySource) {
+          const sourceEntry = discoveredBySource.find((item) => item.source === entry.source);
+          if (!sourceEntry) continue;
+
+          sourceEntry.candidates.push(...entry.candidates);
+          sourceEntry.queriesTried += entry.queriesTried;
+          sourceEntry.pagesFetched += entry.pagesFetched;
+        }
+
+        discoveredBoards = this.uniqueBoardCandidates([...discoveredBoards, ...backfillCandidates]);
+        ({ kept: dedupedCandidates, skipped: skippedDuplicateBoards } =
+          await this.filterNewBoardCandidates(discoveredBoards));
+
+        backfillRounds.push({
+          round,
+          discovered: backfillCandidates.length,
+          dedupedTotal: dedupedCandidates.length,
+          sourceBreakdown: Object.fromEntries(
+            backfillBySource.map((entry) => [entry.source, entry.candidates.length]),
+          ),
+        });
+      }
+    }
 
     const rawText = discoveredBySource
       .map(
@@ -208,9 +277,6 @@ export class JobsService {
           `# ${entry.source}\nqueries=${entry.queriesTried}\npages=${entry.pagesFetched}\ndiscovered=${entry.candidates.length}`,
       )
       .join("\n\n");
-    const discoveredBoards = discoveredBySource.flatMap((entry) => entry.candidates);
-    const { kept: dedupedCandidates, skipped: skippedDuplicateBoards } =
-      await this.filterNewBoardCandidates(discoveredBoards);
     const validationPool = this.interleaveCandidateBoardGroups(
       BOARD_FIRST_SOURCES.map((source) =>
         dedupedCandidates.filter((candidate) => candidate.source === source),
@@ -289,6 +355,7 @@ export class JobsService {
         failedValidationCount: validatedBoards.failedValidations.length,
         failedValidations: validatedBoards.failedValidations.slice(0, 10),
         skippedDuplicateBoards: skippedDuplicateBoards.slice(0, 10),
+        backfillRounds,
         validationPoolSize: validationPool.length,
       },
     };
@@ -308,13 +375,41 @@ export class JobsService {
     }>,
   ) {
     const results = [];
+    const skippedDuplicates = [];
+    const seenNames = new Set<string>();
+    const seenHomepages = new Set<string>();
+    const seenDomains = new Set<string>();
 
     for (const company of companies) {
       const homepage = this.normalizeUrl(company.homepage);
       const careersUrl = company.careersUrl ? this.normalizeUrl(company.careersUrl) : null;
+      const normalizedName = this.normalizeCompanyName(company.company);
+      const normalizedDomain =
+        company.companyDomain?.trim().toLowerCase() ?? this.domainFromUrl(homepage);
+
+      if (
+        seenNames.has(normalizedName) ||
+        seenHomepages.has(homepage) ||
+        (normalizedDomain ? seenDomains.has(normalizedDomain) : false)
+      ) {
+        skippedDuplicates.push({
+          company: company.company,
+          homepage,
+          companyDomain: normalizedDomain,
+          reason: "duplicate_in_import_payload",
+        });
+        continue;
+      }
+
+      seenNames.add(normalizedName);
+      seenHomepages.add(homepage);
+      if (normalizedDomain) {
+        seenDomains.add(normalizedDomain);
+      }
+
       const metadataUpdate = {
         careersUrl,
-        companyDomain: company.companyDomain ?? this.domainFromUrl(homepage),
+        companyDomain: normalizedDomain,
         segments: company.segments ?? [],
         sourceHint: company.sourceHint ?? null,
         confidence: company.confidence ?? null,
@@ -322,10 +417,38 @@ export class JobsService {
         notes: company.notes ?? null,
       };
 
-      const existing = await (this.prisma as any).candidateCompany.findUnique({
-        where: { company_homepage: { company: company.company, homepage } },
-        select: { id: true, status: true },
+      const existingCandidates = await (this.prisma as any).candidateCompany.findMany({
+        where: {
+          OR: [
+            { company: company.company, homepage },
+            { homepage },
+            ...(normalizedDomain ? [{ companyDomain: normalizedDomain }] : []),
+          ],
+        },
+        select: {
+          id: true,
+          company: true,
+          homepage: true,
+          companyDomain: true,
+          segments: true,
+          status: true,
+        },
+        orderBy: [{ updatedAt: "desc" }],
+        take: 5,
       });
+      const existing =
+        existingCandidates.find(
+          (candidate: { company: string; homepage: string }) =>
+            candidate.company === company.company && this.normalizeUrl(candidate.homepage) === homepage,
+        ) ??
+        existingCandidates.find(
+          (candidate: { companyDomain?: string | null }) =>
+            normalizedDomain && candidate.companyDomain?.trim().toLowerCase() === normalizedDomain,
+        ) ??
+        existingCandidates.find(
+          (candidate: { homepage: string }) => this.normalizeUrl(candidate.homepage) === homepage,
+        ) ??
+        null;
 
       let record;
       if (existing) {
@@ -333,7 +456,10 @@ export class JobsService {
         record = await (this.prisma as any).candidateCompany.update({
           where: { id: existing.id },
           data: {
+            company: company.company,
+            homepage,
             ...metadataUpdate,
+            segments: Array.from(new Set([...(existing.segments ?? []), ...(company.segments ?? [])])),
             ...(resetableStatuses.includes(existing.status)
               ? { status: "candidate", lastDiscoveryError: null }
               : {}),
@@ -354,6 +480,8 @@ export class JobsService {
 
     return {
       imported: results.length,
+      skipped: skippedDuplicates.length,
+      skippedDuplicates: skippedDuplicates.slice(0, 20),
       companies: results,
     };
   }
@@ -362,10 +490,10 @@ export class JobsService {
     const candidates = await (this.prisma as any).candidateCompany.findMany({
       where: {
         status: {
-          in: ["candidate", "no_supported_board", "failed"],
+          in: ["candidate", "no_supported_board"],
         },
       },
-      orderBy: [{ confidence: "desc" }, { updatedAt: "desc" }],
+      orderBy: [{ updatedAt: "asc" }, { confidence: "desc" }],
       take: limit,
     });
 
@@ -404,7 +532,7 @@ export class JobsService {
     return {
       processed: results.length,
       companies: results,
-      llmAssistanceEnabled: Boolean(this.openaiClient),
+      llmAssistanceEnabled: results.some((result) => result.enrichmentSource === "scrape+llm"),
     };
   }
 
@@ -412,7 +540,7 @@ export class JobsService {
     return (this.prisma as any).candidateCompany.findMany({
       where: {
         status: {
-          in: ["candidate", "discovering", "discovered", "no_supported_board"],
+          in: ["candidate", "discovering", "discovered"],
         },
       },
       include: {
@@ -429,24 +557,131 @@ export class JobsService {
     });
   }
 
-  async getCandidateDiscoveryTargets() {
+  async listCandidateResearchBacklog() {
     return (this.prisma as any).candidateCompany.findMany({
       where: {
         status: {
-          in: ["candidate", "no_supported_board", "failed"],
+          in: ["no_supported_board", "failed"],
         },
       },
-      orderBy: [{ confidence: "desc" }, { updatedAt: "desc" }, { company: "asc" }],
+      include: {
+        candidateBoards: {
+          where: {
+            status: {
+              in: ["rejected"],
+            },
+          },
+          orderBy: [{ updatedAt: "desc" }],
+        },
+      },
+      orderBy: [{ updatedAt: "desc" }, { company: "asc" }],
     });
+  }
+
+  async getCandidateDiscoveryTargets() {
+    const candidates = await (this.prisma as any).candidateCompany.findMany({
+      where: {
+        status: {
+          in: ["candidate", "no_supported_board"],
+        },
+      },
+    });
+
+    return candidates.sort((left: any, right: any) => {
+      const priorityDiff =
+        this.candidateDiscoveryPriority(right) - this.candidateDiscoveryPriority(left);
+      if (priorityDiff !== 0) {
+        return priorityDiff;
+      }
+
+      const confidenceDiff = (right.confidence ?? 0) - (left.confidence ?? 0);
+      if (confidenceDiff !== 0) {
+        return confidenceDiff;
+      }
+
+      const updatedDiff =
+        new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      if (updatedDiff !== 0) {
+        return updatedDiff;
+      }
+
+      return String(left.company).localeCompare(String(right.company));
+    });
+  }
+
+  async getCandidatePipelineTargets(input?: { includeNoSupported?: boolean; limit?: number }) {
+    const limit = Math.min(Math.max(input?.limit ?? 500, 1), 1000);
+    const candidates = await (this.prisma as any).candidateCompany.findMany({
+      where: {
+        status: {
+          in: input?.includeNoSupported ? ["candidate", "no_supported_board"] : ["candidate"],
+        },
+      },
+    });
+
+    return candidates
+      .sort((left: any, right: any) => {
+        const priorityDiff =
+          this.candidateDiscoveryPriority(right) - this.candidateDiscoveryPriority(left);
+        if (priorityDiff !== 0) {
+          return priorityDiff;
+        }
+
+        const confidenceDiff = (right.confidence ?? 0) - (left.confidence ?? 0);
+        if (confidenceDiff !== 0) {
+          return confidenceDiff;
+        }
+
+        const updatedDiff =
+          new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+        if (updatedDiff !== 0) {
+          return updatedDiff;
+        }
+
+        return String(left.company).localeCompare(String(right.company));
+      })
+      .slice(0, limit);
+  }
+
+  private candidateDiscoveryPriority(candidate: {
+    status?: string | null;
+    sourceHint?: string | null;
+    careersUrl?: string | null;
+  }) {
+    let priority = 0;
+
+    if (candidate.status === "candidate") {
+      priority += 20;
+    }
+
+    if (candidate.status === "no_supported_board") {
+      priority -= 30;
+    }
+
+    if (
+      candidate.sourceHint === "greenhouse" ||
+      candidate.sourceHint === "lever" ||
+      candidate.sourceHint === "ashby"
+    ) {
+      priority += 200;
+    }
+
+    const careersUrl = candidate.careersUrl?.toLowerCase() ?? "";
+    if (
+      careersUrl.includes("greenhouse.io") ||
+      careersUrl.includes("lever.co") ||
+      careersUrl.includes("ashbyhq.com")
+    ) {
+      priority += 160;
+    } else if (careersUrl) {
+      priority += 30;
+    }
+
+    return priority;
   }
 
   async listCandidateBoards() {
     return (this.prisma as any).candidateBoard.findMany({
-      where: {
-        status: {
-          in: ["discovered", "validating", "validated"],
-        },
-      },
       include: {
         candidateCompany: true,
       },
@@ -470,8 +705,6 @@ export class JobsService {
     for (const board of boards) {
       const source = board.sourceName as ExternalJobSource;
       const adapter = this.adapters[source];
-      const companyStatusUpdate =
-        board.candidateCompany.status === "promoted" ? {} : { status: "discovered" };
 
       await (this.prisma as any).candidateBoard.update({
         where: { id: board.id },
@@ -495,14 +728,10 @@ export class JobsService {
             },
           });
 
-          await (this.prisma as any).candidateCompany.update({
-            where: { id: board.candidateCompanyId },
-            data: {
-              ...companyStatusUpdate,
-              lastDiscoveredAt: new Date(),
-              lastDiscoveryError: "Board validated but returned no jobs.",
-            },
-          });
+          await this.updateCandidateCompanyStatusFromBoards(
+            board.candidateCompanyId,
+            "Board validated but returned no jobs.",
+          );
 
           results.push({
             id: board.id,
@@ -524,14 +753,10 @@ export class JobsService {
             },
           });
 
-          await (this.prisma as any).candidateCompany.update({
-            where: { id: board.candidateCompanyId },
-            data: {
-              ...companyStatusUpdate,
-              lastDiscoveredAt: new Date(),
-              lastDiscoveryError: "Board validated but returned no US jobs.",
-            },
-          });
+          await this.updateCandidateCompanyStatusFromBoards(
+            board.candidateCompanyId,
+            "Board validated but returned no US jobs.",
+          );
 
           results.push({
             id: board.id,
@@ -555,7 +780,7 @@ export class JobsService {
         await (this.prisma as any).candidateCompany.update({
           where: { id: board.candidateCompanyId },
           data: {
-            ...companyStatusUpdate,
+            ...(board.candidateCompany.status === "promoted" ? {} : { status: "discovered" }),
             lastDiscoveredAt: new Date(),
             lastDiscoveryError: null,
           },
@@ -578,16 +803,9 @@ export class JobsService {
             validationError: message,
             validatedAt: new Date(),
           },
-        });
+          });
 
-        await (this.prisma as any).candidateCompany.update({
-          where: { id: board.candidateCompanyId },
-          data: {
-            ...companyStatusUpdate,
-            lastDiscoveredAt: new Date(),
-            lastDiscoveryError: message,
-          },
-        });
+        await this.updateCandidateCompanyStatusFromBoards(board.candidateCompanyId, message);
 
         results.push({
           id: board.id,
@@ -603,6 +821,39 @@ export class JobsService {
       processed: results.length,
       results,
     };
+  }
+
+  private async updateCandidateCompanyStatusFromBoards(
+    candidateCompanyId: string,
+    lastDiscoveryError: string | null,
+  ) {
+    const company = await (this.prisma as any).candidateCompany.findUnique({
+      where: { id: candidateCompanyId },
+      include: {
+        candidateBoards: {
+          select: {
+            status: true,
+          },
+        },
+      },
+    });
+
+    if (!company || company.status === "promoted") {
+      return;
+    }
+
+    const hasActiveBoard = company.candidateBoards.some((board: { status: string }) =>
+      ["discovered", "validating", "validated"].includes(board.status),
+    );
+
+    await (this.prisma as any).candidateCompany.update({
+      where: { id: candidateCompanyId },
+      data: {
+        status: hasActiveBoard ? "discovered" : "no_supported_board",
+        lastDiscoveredAt: new Date(),
+        lastDiscoveryError,
+      },
+    });
   }
 
   async promoteValidatedCandidateBoards() {
@@ -972,6 +1223,208 @@ export class JobsService {
     });
   }
 
+  async getJobRegistryStats() {
+    const now = new Date();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const since24h = new Date(now.getTime() - dayMs);
+    const since7d = new Date(now.getTime() - 7 * dayMs);
+    const since14d = new Date(now.getTime() - 14 * dayMs);
+    const since30d = new Date(now.getTime() - 30 * dayMs);
+
+    const [jobStatusCounts, activeJobs, activeBoards, recentJobs] = await Promise.all([
+      this.prisma.job.groupBy({
+        by: ["status"],
+        _count: { _all: true },
+      }),
+      this.prisma.job.findMany({
+        where: {
+          status: JobStatus.active,
+        },
+        select: {
+          sourceName: true,
+          boardToken: true,
+          title: true,
+          company: true,
+          location: true,
+          remoteType: true,
+          postedAt: true,
+          createdAt: true,
+          lastSyncedAt: true,
+        },
+      }),
+      (this.prisma as any).sourceBoard.findMany({
+        where: {
+          active: true,
+        },
+        select: {
+          sourceName: true,
+          status: true,
+          lastCheckedAt: true,
+          lastSeenJobCount: true,
+          lastTargetJobCount: true,
+          totalPersistedJobs: true,
+        },
+      }),
+      this.prisma.job.findMany({
+        where: {
+          status: JobStatus.active,
+        },
+        select: {
+          sourceName: true,
+          boardToken: true,
+          title: true,
+          company: true,
+          location: true,
+          remoteType: true,
+          postedAt: true,
+          lastSyncedAt: true,
+        },
+        orderBy: [{ lastSyncedAt: "desc" }, { updatedAt: "desc" }],
+        take: 12,
+      }),
+    ]);
+
+    const statusCounts = Object.fromEntries(
+      jobStatusCounts.map((row) => [row.status, row._count._all]),
+    ) as Record<string, number>;
+
+    const freshness = {
+      synced24h: 0,
+      synced7d: 0,
+      synced14d: 0,
+      synced30d: 0,
+      posted24h: 0,
+      posted7d: 0,
+      posted14d: 0,
+      posted30d: 0,
+      unknownPostedAt: 0,
+    };
+    const bySource = new Map<string, number>();
+    const byCategory = new Map<string, number>();
+    const byWorkMode = new Map<string, number>();
+    const byLocation = new Map<string, number>();
+    const byCompany = new Map<string, number>();
+    let latestJobSyncAt: Date | null = null;
+
+    for (const job of activeJobs) {
+      this.incrementCount(bySource, job.sourceName);
+      this.incrementCount(byCategory, this.classifyJobCategory(job.title));
+      this.incrementCount(byWorkMode, this.classifyWorkMode(job.remoteType, job.location));
+      this.incrementCount(byLocation, this.classifyRegistryLocation(job.location, job.remoteType));
+      this.incrementCount(byCompany, job.company);
+
+      if (!latestJobSyncAt || job.lastSyncedAt > latestJobSyncAt) {
+        latestJobSyncAt = job.lastSyncedAt;
+      }
+
+      if (job.lastSyncedAt >= since24h) freshness.synced24h += 1;
+      if (job.lastSyncedAt >= since7d) freshness.synced7d += 1;
+      if (job.lastSyncedAt >= since14d) freshness.synced14d += 1;
+      if (job.lastSyncedAt >= since30d) freshness.synced30d += 1;
+
+      if (!job.postedAt) {
+        freshness.unknownPostedAt += 1;
+      } else {
+        if (job.postedAt >= since24h) freshness.posted24h += 1;
+        if (job.postedAt >= since7d) freshness.posted7d += 1;
+        if (job.postedAt >= since14d) freshness.posted14d += 1;
+        if (job.postedAt >= since30d) freshness.posted30d += 1;
+      }
+    }
+
+    const boardStatus = new Map<string, number>();
+    const boardSource = new Map<string, number>();
+    const boardFreshness = {
+      neverChecked: 0,
+      checked24h: 0,
+      checked7d: 0,
+      checked14d: 0,
+      olderThan14d: 0,
+    };
+    let latestBoardCheckAt: Date | null = null;
+
+    for (const board of activeBoards) {
+      this.incrementCount(boardStatus, board.status);
+      this.incrementCount(boardSource, board.sourceName);
+
+      if (!board.lastCheckedAt) {
+        boardFreshness.neverChecked += 1;
+      } else {
+        if (!latestBoardCheckAt || board.lastCheckedAt > latestBoardCheckAt) {
+          latestBoardCheckAt = board.lastCheckedAt;
+        }
+
+        if (board.lastCheckedAt >= since24h) boardFreshness.checked24h += 1;
+        if (board.lastCheckedAt >= since7d) boardFreshness.checked7d += 1;
+        if (board.lastCheckedAt >= since14d) boardFreshness.checked14d += 1;
+        if (board.lastCheckedAt < since14d) boardFreshness.olderThan14d += 1;
+      }
+    }
+
+    const latestIncreaseAnchor = latestJobSyncAt ?? latestBoardCheckAt;
+    const latestIncreaseSince = latestIncreaseAnchor
+      ? new Date(latestIncreaseAnchor.getTime() - 10 * 60 * 1000)
+      : null;
+    const latestIncreaseBySource = new Map<string, number>();
+    let latestIncreaseTotal = 0;
+
+    if (latestIncreaseSince) {
+      for (const job of activeJobs) {
+        if (job.createdAt >= latestIncreaseSince) {
+          latestIncreaseTotal += 1;
+          this.incrementCount(latestIncreaseBySource, job.sourceName);
+        }
+      }
+    }
+
+    return {
+      generatedAt: now.toISOString(),
+      jobs: {
+        total: activeJobs.length + (statusCounts.stale ?? 0) + (statusCounts.inactive ?? 0),
+        active: activeJobs.length,
+        stale: statusCounts.stale ?? 0,
+        inactive: statusCounts.inactive ?? 0,
+        latestSyncAt: latestJobSyncAt?.toISOString() ?? null,
+        latestIncrease: {
+          total: latestIncreaseTotal,
+          since: latestIncreaseSince?.toISOString() ?? null,
+          bySource: this.countMapToRows(latestIncreaseBySource),
+        },
+        freshness,
+        bySource: this.countMapToRows(bySource),
+        byCategory: this.countMapToRows(byCategory),
+        byWorkMode: this.countMapToRows(byWorkMode),
+        byLocation: this.countMapToRows(byLocation),
+        topCompanies: this.countMapToRows(byCompany).slice(0, 10),
+        recent: recentJobs.map((job) => ({
+          sourceName: job.sourceName,
+          boardToken: job.boardToken,
+          title: job.title,
+          company: job.company,
+          location: job.location,
+          remoteType: job.remoteType,
+          postedAt: job.postedAt?.toISOString() ?? null,
+          lastSyncedAt: job.lastSyncedAt.toISOString(),
+        })),
+      },
+      boards: {
+        total: activeBoards.length,
+        latestCheckedAt: latestBoardCheckAt?.toISOString() ?? null,
+        byStatus: this.countMapToRows(boardStatus),
+        bySource: this.countMapToRows(boardSource),
+        freshness: boardFreshness,
+        totalTargetJobsLastRun: activeBoards.reduce(
+          (sum: number, board: { lastTargetJobCount: number | null }) => sum + (board.lastTargetJobCount ?? 0),
+          0,
+        ),
+        totalPersistedJobsReported: activeBoards.reduce(
+          (sum: number, board: { totalPersistedJobs: number | null }) => sum + (board.totalPersistedJobs ?? 0),
+          0,
+        ),
+      },
+    };
+  }
+
   async markCandidateCompanyDiscoveryStarted(candidateCompanyId: string) {
     await (this.prisma as any).candidateCompany.update({
       where: { id: candidateCompanyId },
@@ -1196,7 +1649,7 @@ export class JobsService {
       }
     }
 
-    if (this.openaiClient) {
+    if (this.openaiCompanyEnrichmentEnabled && this.openaiClient && !sourceHint && !careersUrl) {
       const llmResult = await this.runLlmCompanyEnrichment({
         company: candidate.company,
         homepage: candidate.homepage,
@@ -1229,7 +1682,7 @@ export class JobsService {
       segments: [],
       confidence: sourceHint ? 0.78 : null,
       notes: sourceHint ? "ATS source inferred from scraping." : null,
-      enrichmentSource: "scrape-only",
+      enrichmentSource: sourceHint || careersUrl ? "scrape-only" : "scrape-only:no-llm",
       error: errors.length ? errors.join(" | ") : null,
     };
   }
@@ -1271,13 +1724,31 @@ export class JobsService {
       if (!href) continue;
 
       try {
-        return new URL(href, baseUrl).toString();
+        const url = new URL(href, baseUrl);
+        if (!this.isLikelyCareersPageUrl(url)) {
+          continue;
+        }
+
+        return url.toString();
       } catch {
         continue;
       }
     }
 
     return null;
+  }
+
+  private isLikelyCareersPageUrl(url: URL) {
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return false;
+    }
+
+    const pathname = url.pathname.toLowerCase();
+    if (!/(careers?|jobs?|open-roles?|positions?|join-us)/i.test(pathname)) {
+      return false;
+    }
+
+    return !/\.(?:avif|bmp|css|gif|ico|jpeg|jpg|js|map|mp4|pdf|png|svg|webp|woff2?)$/i.test(pathname);
   }
 
   private async runLlmCompanyEnrichment(input: {
@@ -1502,28 +1973,131 @@ Return strict JSON:
     };
 
     const focusTermsByArea: Record<string, string[]> = {
-      "software engineering": ["software engineer", "backend engineer", "frontend engineer"],
-      product: ["product manager", "technical product manager"],
-      design: ["product designer", "ux designer"],
-      qa: ["qa engineer", "sdet"],
+      "software engineering": [
+        "software engineer",
+        "software developer",
+        "full stack developer",
+        "backend engineer",
+        "frontend engineer",
+        "java developer",
+        "python developer",
+        ".net developer",
+        "react developer",
+        "mobile developer",
+        "android developer",
+        "ios developer",
+      ],
+      data: [
+        "data engineer",
+        "data analyst",
+        "business intelligence analyst",
+        "bi developer",
+        "analytics engineer",
+        "data scientist",
+        "machine learning engineer",
+        "etl developer",
+        "data warehouse developer",
+        "sql developer",
+      ],
+      product: [
+        "product manager",
+        "product owner",
+        "technical product manager",
+        "technical program manager",
+        "project manager",
+        "scrum master",
+      ],
+      design: [
+        "product designer",
+        "ux designer",
+        "ui designer",
+        "ux researcher",
+        "design engineer",
+      ],
+      qa: [
+        "qa engineer",
+        "qa analyst",
+        "quality assurance engineer",
+        "sdet",
+        "automation engineer",
+        "test engineer",
+        "software test engineer",
+      ],
+      "cloud infrastructure": [
+        "devops engineer",
+        "cloud engineer",
+        "aws engineer",
+        "azure engineer",
+        "infrastructure engineer",
+        "platform engineer",
+        "site reliability engineer",
+        "sre",
+        "kubernetes engineer",
+        "linux engineer",
+      ],
+      security: [
+        "security engineer",
+        "cybersecurity analyst",
+        "information security analyst",
+        "application security engineer",
+        "cloud security engineer",
+        "soc analyst",
+        "grc analyst",
+      ],
+      "it support": [
+        "systems engineer",
+        "systems administrator",
+        "network engineer",
+        "it support engineer",
+        "technical support engineer",
+        "application support engineer",
+        "production support engineer",
+        "desktop support",
+        "help desk",
+      ],
+      "business systems": [
+        "business analyst",
+        "systems analyst",
+        "implementation consultant",
+        "solutions consultant",
+        "solutions engineer",
+        "integration engineer",
+      ],
+      "erp crm": [
+        "salesforce developer",
+        "salesforce administrator",
+        "servicenow developer",
+        "servicenow administrator",
+        "sap consultant",
+        "oracle developer",
+        "workday analyst",
+        "erp analyst",
+        "crm analyst",
+      ],
     };
 
     const focusTerms = Array.from(
       new Set(
         input.focusAreas.flatMap((area) => focusTermsByArea[area.toLowerCase()] ?? [area.toLowerCase()]),
       ),
-    ).slice(0, 6);
+    ).slice(0, 72);
 
-    const roleClause = focusTerms.map((term) => `"${term}"`).join(" OR ");
     const usClause = '"United States" OR "Remote US" OR "Remote, US" OR USA OR "New York" OR "San Francisco"';
+    const roleGroups = this.chunkSearchTerms(focusTerms, 4);
 
     return hostsBySource[input.source].flatMap((host) => {
-      const queries = [
-        `site:${host} (${roleClause}) (${usClause})`,
-        `site:${host} jobs (${roleClause})`,
-        `site:${host} careers (${roleClause}) (${usClause})`,
+      const queries = roleGroups.flatMap((group) => {
+        const roleClause = group.map((term) => `"${term}"`).join(" OR ");
+        return [
+          `site:${host} (${roleClause}) (${usClause})`,
+          `site:${host} jobs (${roleClause})`,
+          `site:${host} careers (${roleClause}) (${usClause})`,
+        ];
+      });
+
+      queries.push(
         `site:${host} ${input.source} board`,
-      ];
+      );
 
       if (input.customQuery?.trim()) {
         queries.push(`site:${host} ${input.customQuery.trim()}`);
@@ -1531,6 +2105,16 @@ Return strict JSON:
 
       return queries;
     });
+  }
+
+  private chunkSearchTerms(terms: string[], size: number) {
+    const chunks: string[][] = [];
+
+    for (let index = 0; index < terms.length; index += size) {
+      chunks.push(terms.slice(index, index + size));
+    }
+
+    return chunks.length ? chunks : [["software engineer", "data engineer", "qa engineer", "product manager"]];
   }
 
   private async harvestDirectBoardCandidates(input: {
@@ -1609,8 +2193,14 @@ Return strict JSON:
           }
         }
 
-        if (this.openaiClient && candidates.length < Math.min(requested, 10)) {
-          const fallbackQueries = queries.slice(0, Math.min(queries.length, 4));
+        if (this.openaiBoardFallbackEnabled && this.openaiClient && candidates.length < targetCandidates) {
+          const fallbackTarget = Math.min(targetCandidates, Math.max(requested * 2, 40));
+          const fallbackQueries = this.buildBoardSourceFallbackQueries({
+            source,
+            focusAreas: input.focusAreas,
+            customQuery: input.customQuery,
+            directQueries: queries,
+          });
 
           for (const query of fallbackQueries) {
             queriesTried += 1;
@@ -1626,9 +2216,13 @@ Return strict JSON:
                   source: board.source,
                   boardToken: board.boardToken,
                   evidenceUrl: board.evidenceUrl,
+                  evidenceKind: board.evidenceKind,
+                  evidenceSource: board.evidenceSource,
                 }),
               )
-              .filter((candidate): candidate is CandidateBoardInput => Boolean(candidate));
+              .filter((candidate): candidate is CandidateBoardInput => Boolean(candidate))
+              .filter((candidate) => this.shouldKeepFallbackBoardCandidate(candidate))
+              .sort((left, right) => this.compareBoardCandidateEvidence(left, right));
 
             for (const candidate of pageCandidates) {
               const key = `${candidate.source}:${candidate.boardToken}`;
@@ -1639,12 +2233,12 @@ Return strict JSON:
               seenKeys.add(key);
               candidates.push(candidate);
 
-              if (candidates.length >= targetCandidates) {
+              if (candidates.length >= fallbackTarget) {
                 break;
               }
             }
 
-            if (candidates.length >= targetCandidates) {
+            if (candidates.length >= fallbackTarget) {
               break;
             }
           }
@@ -1655,6 +2249,98 @@ Return strict JSON:
           candidates,
           queriesTried,
           pagesFetched,
+        };
+      }),
+    );
+  }
+
+  private async harvestBackfillBoardCandidates(input: {
+    round: number;
+    limitsBySource: Record<Exclude<ExternalJobSource, "adzuna">, number>;
+    focusAreas: string[];
+    customQuery?: string;
+    knownCandidates: CandidateBoardInput[];
+    keptCandidates: CandidateBoardInput[];
+  }) {
+    return Promise.all(
+      BOARD_FIRST_SOURCES.map(async (source) => {
+        const requested = input.limitsBySource[source];
+        const keptForSource = input.keptCandidates.filter((candidate) => candidate.source === source).length;
+        const needed = Math.max(requested - keptForSource, 0);
+
+        if (needed === 0) {
+          return {
+            source,
+            candidates: [] as CandidateBoardInput[],
+            queriesTried: 0,
+            pagesFetched: 0,
+          };
+        }
+
+        const seenKeys = new Set(
+          input.knownCandidates.map((candidate) => `${candidate.source}:${candidate.boardToken.toLowerCase()}`),
+        );
+        const avoidTokens = input.knownCandidates
+          .filter((candidate) => candidate.source === source)
+          .map((candidate) => candidate.boardToken)
+          .slice(-60);
+        const candidates: CandidateBoardInput[] = [];
+        const targetCandidates = Math.min(Math.max(needed * 4, 30), 120);
+        const queries = this.buildBoardSourceBackfillQueries({
+          source,
+          focusAreas: input.focusAreas,
+          customQuery: input.customQuery,
+          avoidTokens,
+          round: input.round,
+        });
+        let queriesTried = 0;
+
+        for (const query of queries) {
+          queriesTried += 1;
+
+          const sourceUrls = await this.runBoardSourceSearchWithOpenAi({
+            source,
+            query,
+            focusAreas: input.focusAreas,
+          });
+          const pageCandidates = this.extractBoardCandidatesFromSourceUrls(sourceUrls, source)
+            .map((board) =>
+              this.normalizeBoardCandidate({
+                source: board.source,
+                boardToken: board.boardToken,
+                evidenceUrl: board.evidenceUrl,
+                evidenceKind: board.evidenceKind,
+                evidenceSource: board.evidenceSource,
+              }),
+            )
+            .filter((candidate): candidate is CandidateBoardInput => Boolean(candidate))
+            .filter((candidate) => this.shouldKeepFallbackBoardCandidate(candidate))
+            .sort((left, right) => this.compareBoardCandidateEvidence(left, right));
+
+          for (const candidate of pageCandidates) {
+            const key = `${candidate.source}:${candidate.boardToken.toLowerCase()}`;
+            if (seenKeys.has(key)) {
+              continue;
+            }
+
+            seenKeys.add(key);
+            candidates.push(candidate);
+
+            if (candidates.length >= targetCandidates) {
+              break;
+            }
+          }
+
+          if (candidates.length >= targetCandidates) {
+            break;
+          }
+        }
+
+        return {
+          source,
+          candidates,
+          queriesTried,
+          pagesFetched: 0,
         };
       }),
     );
@@ -1685,6 +2371,111 @@ Return strict JSON:
     }
 
     return selected;
+  }
+
+  private uniqueBoardCandidates(candidates: CandidateBoardInput[]) {
+    const seenKeys = new Set<string>();
+    const unique: CandidateBoardInput[] = [];
+
+    for (const candidate of candidates) {
+      const key = `${candidate.source}:${candidate.boardToken.toLowerCase()}`;
+      if (seenKeys.has(key)) {
+        continue;
+      }
+
+      seenKeys.add(key);
+      unique.push(candidate);
+    }
+
+    return unique;
+  }
+
+  private buildBoardSourceFallbackQueries(input: {
+    source: Exclude<ExternalJobSource, "adzuna">;
+    focusAreas: string[];
+    customQuery?: string;
+    directQueries: string[];
+  }) {
+    const roleFamilies = input.focusAreas.join(", ");
+    const sourcePrompts: Record<Exclude<ExternalJobSource, "adzuna">, string[]> = {
+      greenhouse: [
+        `Find real Greenhouse company job board URLs on boards.greenhouse.io or job-boards.greenhouse.io for US companies hiring in ${roleFamilies}.`,
+        `Find Greenhouse job posting URLs on job-boards.greenhouse.io with United States or Remote US jobs in software, data, product, QA, cloud, security, and IT roles.`,
+        `Find boards.greenhouse.io/embed/job_board?for= company board URLs for technology companies with US jobs.`,
+        `Find Greenhouse boards for AI, SaaS, fintech, devtools, healthcare technology, security, data, and infrastructure companies hiring in the US.`,
+      ],
+      lever: [
+        `Find current Lever job posting URLs on jobs.lever.co with United States or Remote US jobs in software, data, product, QA, cloud, security, and IT roles.`,
+        `Find jobs.lever.co URLs with at least two path segments, like jobs.lever.co/<company>/<posting-id-or-slug>, for AI, SaaS, fintech, devtools, healthcare technology, security, data, and infrastructure companies hiring in the US.`,
+        `Find direct Lever posting URLs that appeared verbatim in search results for US-based technology roles. Exclude board-root-only URLs like jobs.lever.co/<company>.`,
+      ],
+      ashby: [
+        `Find real Ashby company job board URLs that appear verbatim on jobs.ashbyhq.com for US companies hiring in ${roleFamilies}.`,
+        `Find current Ashby job posting URLs on jobs.ashbyhq.com with United States or Remote US jobs in software, data, product, QA, cloud, security, and IT roles.`,
+        `Find jobs.ashbyhq.com company boards for AI, SaaS, fintech, devtools, healthcare technology, security, data, and infrastructure companies hiring in the US. Do not guess a board URL from a company name.`,
+      ],
+    };
+    const sampledDirectQueries = this.sampleSearchQueries(input.directQueries, 8);
+    const customQuery = input.customQuery?.trim()
+      ? [`Find ${input.source} job board URLs related to: ${input.customQuery.trim()}`]
+      : [];
+
+    return Array.from(
+      new Set([...customQuery, ...sourcePrompts[input.source], ...sampledDirectQueries]),
+    ).slice(0, 12);
+  }
+
+  private buildBoardSourceBackfillQueries(input: {
+    source: Exclude<ExternalJobSource, "adzuna">;
+    focusAreas: string[];
+    customQuery?: string;
+    avoidTokens: string[];
+    round: number;
+  }) {
+    const roleFamilies = input.focusAreas.join(", ");
+    const avoidClause = input.avoidTokens.length
+      ? `Avoid these already-seen board tokens: ${input.avoidTokens.join(", ")}.`
+      : "Avoid duplicates from earlier results.";
+    const sourcePrompts: Record<Exclude<ExternalJobSource, "adzuna">, string[]> = {
+      greenhouse: [
+        `Backfill more real Greenhouse job board or posting URLs for US technology companies hiring in ${roleFamilies}. ${avoidClause}`,
+        `Find additional job-boards.greenhouse.io posting URLs or company boards for US software, data, product, QA, cloud, security, and IT roles. ${avoidClause}`,
+      ],
+      lever: [
+        `Backfill more real Lever posting URLs with at least two path segments on jobs.lever.co for US technology roles. ${avoidClause}`,
+        `Find additional current jobs.lever.co/<company>/<posting-id-or-slug> URLs for software, data, product, QA, cloud, security, and IT roles in the US. ${avoidClause}`,
+      ],
+      ashby: [
+        `Backfill more real Ashby job board or posting URLs on jobs.ashbyhq.com for US technology companies hiring in ${roleFamilies}. ${avoidClause}`,
+        `Find additional jobs.ashbyhq.com company boards or posting URLs for software, data, product, QA, cloud, security, and IT roles in the US. ${avoidClause}`,
+      ],
+    };
+    const customQuery = input.customQuery?.trim()
+      ? [`Backfill ${input.source} ATS URLs related to "${input.customQuery.trim()}". ${avoidClause}`]
+      : [];
+    const roundPrompt =
+      input.round > 1
+        ? [`Find less obvious but still real ${input.source} ATS URLs from mid-market and growth-stage companies. ${avoidClause}`]
+        : [];
+
+    return Array.from(
+      new Set([...customQuery, ...sourcePrompts[input.source], ...roundPrompt]),
+    );
+  }
+
+  private sampleSearchQueries(queries: string[], limit: number) {
+    if (queries.length <= limit) {
+      return queries;
+    }
+
+    const selected: string[] = [];
+    const lastIndex = queries.length - 1;
+
+    for (let index = 0; index < limit; index += 1) {
+      selected.push(queries[Math.round((index / (limit - 1)) * lastIndex)]);
+    }
+
+    return Array.from(new Set(selected));
   }
 
   private async runBoardSourceSearch(input: {
@@ -1739,10 +2530,15 @@ Return strict JSON:
               {
                 type: "input_text",
                 text: [
-                  "Find public hosted ATS job posting URLs only.",
+                  "Find public hosted ATS job board and job posting URLs only.",
                   `Target ATS source: ${input.source}.`,
                   "Prioritize companies hiring in the United States or remote US.",
-                  "Prefer direct job posting URLs or apply URLs on the requested ATS host.",
+                  "Prefer company-level board URLs, then direct job posting URLs, on the requested ATS host.",
+                  "Only include URLs that appeared verbatim in web search results.",
+                  "Do not construct, infer, or guess an ATS URL from a company name.",
+                  "Do not include placeholders like company-a, company-b, example, sample, or test.",
+                  "If you are unsure whether the exact URL exists, omit it.",
+                  "Return a newline-separated list of up to 50 URLs. Do not include prose.",
                 ].join(" "),
               },
             ],
@@ -1759,7 +2555,24 @@ Return strict JSON:
         ],
       });
 
-      return this.extractWebSearchSourceUrls(response);
+      const urls = new Map<string, SourceUrlEvidence>();
+      for (const url of this.extractWebSearchSourceUrls(response)) {
+        urls.set(url, {
+          url,
+          evidenceSource: "openai_citation",
+        });
+      }
+
+      for (const url of this.extractUrlsFromText(this.extractResponseText(response))) {
+        if (!urls.has(url)) {
+          urls.set(url, {
+            url,
+            evidenceSource: "openai_text",
+          });
+        }
+      }
+
+      return Array.from(urls.values());
     } catch {
       return [];
     }
@@ -1832,7 +2645,9 @@ Return strict JSON:
       ...this.extractBoardCandidatesFromSourceUrls(sourceUrls, source),
       ...[html].flatMap((text) => {
         try {
-          return extractBoardsFromText(text, text).filter((candidate) => candidate.source === source);
+          return extractBoardsFromText(text, text)
+            .filter((candidate) => candidate.source === source)
+            .map((candidate) => this.withBoardEvidence(candidate, "direct_search"));
         } catch {
           return [];
         }
@@ -1845,22 +2660,121 @@ Return strict JSON:
           source: board.source,
           boardToken: board.boardToken,
           evidenceUrl: board.evidenceUrl,
+          evidenceKind: board.evidenceKind,
+          evidenceSource: board.evidenceSource,
         }),
       )
       .filter((candidate): candidate is CandidateBoardInput => Boolean(candidate));
   }
 
   private extractBoardCandidatesFromSourceUrls(
-    sourceUrls: string[],
+    sourceUrls: Array<string | SourceUrlEvidence>,
     source: Exclude<ExternalJobSource, "adzuna">,
   ) {
-    return sourceUrls.flatMap((text) => {
+    return sourceUrls.flatMap((sourceUrl) => {
+      const evidence =
+        typeof sourceUrl === "string"
+          ? {
+              url: sourceUrl,
+              evidenceSource: "direct_search" as const,
+            }
+          : sourceUrl;
+
       try {
-        return extractBoardsFromText(text, text).filter((candidate) => candidate.source === source);
+        return extractBoardsFromText(evidence.url, evidence.url)
+          .filter((candidate) => candidate.source === source)
+          .map((candidate) => this.withBoardEvidence(candidate, evidence.evidenceSource));
       } catch {
         return [];
       }
     });
+  }
+
+  private withBoardEvidence(
+    candidate: Pick<CandidateBoardInput, "source" | "boardToken" | "evidenceUrl">,
+    evidenceSource: CandidateEvidenceSource,
+  ): CandidateBoardInput {
+    return {
+      ...candidate,
+      evidenceKind: this.classifyBoardEvidence(candidate.source, candidate.evidenceUrl),
+      evidenceSource,
+    };
+  }
+
+  private classifyBoardEvidence(source: ExternalJobSource, evidenceUrl: string): CandidateEvidenceKind {
+    try {
+      const parsed = new URL(evidenceUrl.replace(/&amp;/g, "&"));
+      const hostname = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+      const segments = parsed.pathname.split("/").filter(Boolean);
+
+      if (
+        (source === "greenhouse" && hostname === "boards-api.greenhouse.io") ||
+        (source === "lever" && hostname === "api.lever.co") ||
+        (source === "ashby" && hostname === "api.ashbyhq.com")
+      ) {
+        return "api_url";
+      }
+
+      if (source === "greenhouse") {
+        if (hostname === "job-boards.greenhouse.io") {
+          return segments.length > 2 && segments[1] === "jobs" ? "job_posting_url" : "board_root_url";
+        }
+
+        if (hostname === "boards.greenhouse.io") {
+          return segments[0] === "embed" && parsed.searchParams.has("token")
+            ? "job_posting_url"
+            : "board_root_url";
+        }
+      }
+
+      if (source === "lever" && hostname === "jobs.lever.co") {
+        return segments.length > 1 ? "job_posting_url" : "board_root_url";
+      }
+
+      if (source === "ashby" && hostname === "jobs.ashbyhq.com") {
+        return segments.length > 1 ? "job_posting_url" : "board_root_url";
+      }
+    } catch {
+      return "unknown";
+    }
+
+    return "unknown";
+  }
+
+  private shouldKeepFallbackBoardCandidate(candidate: CandidateBoardInput) {
+    if (candidate.source === "lever" && candidate.evidenceKind === "board_root_url") {
+      return false;
+    }
+
+    if (
+      (candidate.source === "lever" || candidate.source === "ashby") &&
+      candidate.evidenceSource === "openai_text" &&
+      candidate.evidenceKind === "board_root_url"
+    ) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private compareBoardCandidateEvidence(left: CandidateBoardInput, right: CandidateBoardInput) {
+    return this.boardCandidateEvidenceScore(right) - this.boardCandidateEvidenceScore(left);
+  }
+
+  private boardCandidateEvidenceScore(candidate: CandidateBoardInput) {
+    const kindScore: Record<CandidateEvidenceKind, number> = {
+      api_url: 4,
+      job_posting_url: 3,
+      board_root_url: 1,
+      unknown: 0,
+    };
+    const sourceScore: Record<CandidateEvidenceSource, number> = {
+      direct_search: 3,
+      openai_citation: 2,
+      openai_text: 0,
+    };
+
+    return (kindScore[candidate.evidenceKind ?? "unknown"] * 10) + sourceScore[candidate.evidenceSource ?? "openai_text"];
   }
 
   private extractWebSearchSourceUrls(response: unknown) {
@@ -1918,6 +2832,19 @@ Return strict JSON:
     }
 
     return Array.from(new Set(urls));
+  }
+
+  private extractUrlsFromText(text: string) {
+    const urls = new Set<string>();
+
+    for (const match of text.matchAll(/https?:\/\/[^\s"'<>\\)]+/gi)) {
+      const url = match[0]?.replace(/&amp;/g, "&").replace(/[.,;:]+$/, "");
+      if (url) {
+        urls.add(url);
+      }
+    }
+
+    return Array.from(urls);
   }
 
   private isSearchAnomalyPage(html: string) {
@@ -1993,7 +2920,7 @@ Return strict JSON:
     }
   }
 
-  private normalizeBoardCandidate(candidate: CandidateBoardInput) {
+  private normalizeBoardCandidate(candidate: CandidateBoardInput): CandidateBoardInput | null {
     const normalizedToken = candidate.boardToken.trim();
     if (!normalizedToken) {
       return null;
@@ -2008,6 +2935,8 @@ Return strict JSON:
       source: candidate.source,
       boardToken: normalizedToken,
       evidenceUrl,
+      evidenceKind: candidate.evidenceKind ?? this.classifyBoardEvidence(candidate.source, candidate.evidenceUrl),
+      evidenceSource: candidate.evidenceSource,
     };
   }
 
@@ -2044,12 +2973,23 @@ Return strict JSON:
   }
 
   private async filterNewBoardCandidates(candidates: CandidateBoardInput[]) {
+    const rejectedAfter = new Date(Date.now() - BOARD_REJECTION_COOLDOWN_DAYS * 24 * 60 * 60 * 1000);
     const [existingCandidateBoards, existingSourceBoards] = await Promise.all([
       (this.prisma as any).candidateBoard.findMany({
         where: {
-          status: {
-            in: ["discovered", "validating", "validated"],
-          },
+          OR: [
+            {
+              status: {
+                in: ["discovered", "validating", "validated"],
+              },
+            },
+            {
+              status: "rejected",
+              updatedAt: {
+                gte: rejectedAfter,
+              },
+            },
+          ],
         },
         select: {
           sourceName: true,
@@ -2451,6 +3391,83 @@ Return strict JSON:
       .replace(/[^a-z0-9]+/g, " ")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  private incrementCount(map: Map<string, number>, key: string | null | undefined) {
+    const normalized = key?.trim() || "Unknown";
+    map.set(normalized, (map.get(normalized) ?? 0) + 1);
+  }
+
+  private countMapToRows(map: Map<string, number>) {
+    return Array.from(map.entries())
+      .map(([label, count]) => ({ label, count }))
+      .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+  }
+
+  private classifyJobCategory(title: string) {
+    const normalized = title.toLowerCase();
+
+    if (/\b(machine learning|ml engineer|ai engineer|artificial intelligence|llm|nlp|computer vision)\b/.test(normalized)) {
+      return "AI / ML";
+    }
+    if (/\b(data engineer|data scientist|analytics engineer|business intelligence|bi\b|data analyst|analytics|etl|warehouse)\b/.test(normalized)) {
+      return "Data";
+    }
+    if (/\b(product manager|product owner|group product|principal product|technical product)\b/.test(normalized)) {
+      return "Product";
+    }
+    if (/\b(qa|quality assurance|sdet|test automation|software development engineer in test)\b/.test(normalized)) {
+      return "QA / Test";
+    }
+    if (/\b(security|cybersecurity|appsec|application security|trust and safety|iam|identity)\b/.test(normalized)) {
+      return "Security";
+    }
+    if (/\b(devops|sre|site reliability|cloud|infrastructure|platform engineer|systems engineer|kubernetes)\b/.test(normalized)) {
+      return "Cloud / Infrastructure";
+    }
+    if (/\b(ux|ui|product design|designer|researcher)\b/.test(normalized)) {
+      return "Design";
+    }
+    if (/\b(salesforce|servicenow|erp|crm|business systems|netsuite|workday analyst|systems analyst)\b/.test(normalized)) {
+      return "Business Systems";
+    }
+    if (/\b(it support|help desk|desktop support|technical support|support engineer|support specialist)\b/.test(normalized)) {
+      return "IT / Support";
+    }
+    if (/\b(program manager|project manager|scrum master|delivery manager|tpm|technical program)\b/.test(normalized)) {
+      return "Program / Delivery";
+    }
+    if (/\b(software|engineer|developer|frontend|front end|backend|back end|full stack|mobile|ios|android)\b/.test(normalized)) {
+      return "Software Engineering";
+    }
+
+    return "Other";
+  }
+
+  private classifyWorkMode(remoteType?: string | null, location?: string | null) {
+    const combined = `${remoteType ?? ""} ${location ?? ""}`.toLowerCase();
+
+    if (/\b(remote|work from home|wfh)\b/.test(combined)) return "Remote";
+    if (/\bhybrid\b/.test(combined)) return "Hybrid";
+    if (/\bonsite|on-site|office\b/.test(combined)) return "Onsite";
+    return "Unknown";
+  }
+
+  private classifyRegistryLocation(location?: string | null, remoteType?: string | null) {
+    const combined = `${location ?? ""} ${remoteType ?? ""}`.toLowerCase();
+
+    if (!combined.trim()) return "Unknown";
+    if (combined.includes("remote") && /\b(us|usa|united states|u\.s\.|north america)\b/.test(combined)) {
+      return "Remote US / North America";
+    }
+    if (/\b(united states|usa|u\.s\.| us |new york|san francisco|california|texas|florida|washington|chicago|boston|austin|seattle|denver|atlanta|remote, us)\b/.test(` ${combined} `)) {
+      return "US";
+    }
+    if (/\bcanada|north america\b/.test(combined)) {
+      return "North America";
+    }
+    if (combined.includes("remote")) return "Remote, location unclear";
+    return "Other / Global";
   }
 
   private targetCompanyDomain(company: string) {

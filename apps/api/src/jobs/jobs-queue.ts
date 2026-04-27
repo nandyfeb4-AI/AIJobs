@@ -5,6 +5,7 @@ import type { ExternalJobSource } from "@aijobs/types";
 
 export const JOBS_INGEST_QUEUE = "jobs-ingest";
 export const BOARD_DISCOVERY_QUEUE = "board-discovery";
+export const CANDIDATE_PIPELINE_QUEUE = "candidate-pipeline";
 
 export type JobsIngestPayload = {
   source: ExternalJobSource;
@@ -14,6 +15,10 @@ export type JobsIngestPayload = {
 export type BoardDiscoveryPayload = {
   companyId: string;
   targetType?: "catalog" | "candidate";
+};
+
+export type CandidatePipelinePayload = {
+  companyId: string;
 };
 
 export function createRedisConnection() {
@@ -43,6 +48,21 @@ export function createBoardDiscoveryQueue(connection = createRedisConnection()) 
     defaultJobOptions: {
       removeOnComplete: 200,
       removeOnFail: 200,
+      attempts: 2,
+      backoff: {
+        type: "exponential",
+        delay: 2000,
+      },
+    },
+  });
+}
+
+export function createCandidatePipelineQueue(connection = createRedisConnection()) {
+  return new Queue<CandidatePipelinePayload>(CANDIDATE_PIPELINE_QUEUE, {
+    connection,
+    defaultJobOptions: {
+      removeOnComplete: 500,
+      removeOnFail: 500,
       attempts: 2,
       backoff: {
         type: "exponential",

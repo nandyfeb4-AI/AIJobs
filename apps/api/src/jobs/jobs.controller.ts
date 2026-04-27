@@ -5,7 +5,9 @@ import type { ExternalJobSource } from "@aijobs/types";
 import {
   CandidateBoardSourceDto,
   CandidateBootstrapDto,
+  CandidateDiscoverDto,
   CandidateEnrichDto,
+  CandidatePipelineDto,
   CandidateSourceDto,
   UpsertCandidateCompaniesDto,
 } from "./jobs.dto";
@@ -76,6 +78,11 @@ export class JobsController {
     return this.jobsService.listCandidateCompanies();
   }
 
+  @Get("candidate-research-backlog")
+  async candidateResearchBacklog() {
+    return this.jobsService.listCandidateResearchBacklog();
+  }
+
   @Get("candidate-seed-groups")
   async candidateSeedGroups() {
     return this.jobsService.listCandidateSeedGroups();
@@ -115,10 +122,34 @@ export class JobsController {
   }
 
   @Post("candidate-discover")
-  async candidateDiscover() {
+  async candidateDiscover(
+    @Body() body: CandidateDiscoverDto,
+  ) {
     const targets = await this.jobsService.getCandidateDiscoveryTargets();
+    const limit = Math.min(Math.max(body.limit ?? 100, 1), 200);
+    const selectedTargets = targets.slice(0, limit);
     const jobs = await this.jobsQueueService.enqueueBoardDiscoveries(
-      targets.map((company: { id: string }) => ({ companyId: company.id, targetType: "candidate" })),
+      selectedTargets.map((company: { id: string }) => ({ companyId: company.id, targetType: "candidate" })),
+    );
+
+    return {
+      candidateCompanies: targets.length,
+      selected: selectedTargets.length,
+      enqueued: jobs.length,
+      jobs,
+    };
+  }
+
+  @Post("candidate-pipeline/run")
+  async runCandidatePipeline(
+    @Body() body: CandidatePipelineDto,
+  ) {
+    const targets = await this.jobsService.getCandidatePipelineTargets({
+      limit: body.limit,
+      includeNoSupported: body.includeNoSupported,
+    });
+    const jobs = await this.jobsQueueService.enqueueCandidatePipelines(
+      targets.map((company: { id: string }) => ({ companyId: company.id })),
     );
 
     return {
@@ -205,6 +236,11 @@ export class JobsController {
       cursor,
       limit: limit ? Number(limit) : undefined,
     });
+  }
+
+  @Get("registry")
+  async registry() {
+    return this.jobsService.getJobRegistryStats();
   }
 
   @Get("boards")

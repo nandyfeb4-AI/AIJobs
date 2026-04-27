@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type CandidateCompanyStatus =
   | "candidate"
@@ -47,9 +47,34 @@ type CandidateBoard = {
   candidateCompany?: { company: string };
 };
 
+type CandidateImportInput = {
+  company: string;
+  homepage: string;
+  careersUrl?: string;
+  companyDomain?: string;
+  segments?: string[];
+  sourceHint?: string;
+  confidence?: number;
+  origin?: string;
+  notes?: string;
+};
+
 function apiBase() {
   return process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api";
 }
+
+const DEFAULT_IT_FOCUS_AREAS = [
+  "software engineering",
+  "data",
+  "product",
+  "qa",
+  "cloud infrastructure",
+  "security",
+  "it support",
+  "business systems",
+  "erp crm",
+  "design",
+].join(", ");
 
 function formatRelativeish(timestamp?: string | null) {
   if (!timestamp) return "—";
@@ -95,6 +120,206 @@ function boardStatusTone(status: CandidateBoardStatus) {
   }
 }
 
+function classifyResearchBacklog(company: CandidateCompany) {
+  const url = `${company.careersUrl ?? ""} ${company.lastDiscoveryError ?? ""}`.toLowerCase();
+
+  if (url.includes("myworkdayjobs.com") || url.includes("workdayjobs.com")) return "Workday";
+  if (url.includes("smartrecruiters.com")) return "SmartRecruiters";
+  if (url.includes("icims.com")) return "iCIMS";
+  if (url.includes("jobvite.com")) return "Jobvite";
+  if (url.includes("bamboohr.com")) return "BambooHR";
+  if (url.includes("workable.com")) return "Workable";
+  if (url.includes("teamtailor.com")) return "Teamtailor";
+  if (url.includes("rippling.com")) return "Rippling";
+  if (url.includes("greenhouse.io") || url.includes("lever.co") || url.includes("ashbyhq.com")) {
+    return "Retry Supported ATS";
+  }
+  if (company.careersUrl) return "Direct Careers";
+  if (url.includes("403") || url.includes("aborted") || url.includes("fetch failed")) return "Blocked";
+  return "Unknown";
+}
+
+function parseCsvRows(input: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+    const nextChar = input[index + 1];
+
+    if (char === "\"") {
+      if (inQuotes && nextChar === "\"") {
+        cell += "\"";
+        index += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      row.push(cell.trim());
+      cell = "";
+      continue;
+    }
+
+    if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && nextChar === "\n") {
+        index += 1;
+      }
+      row.push(cell.trim());
+      cell = "";
+      if (row.some((value) => value.length > 0)) {
+        rows.push(row);
+      }
+      row = [];
+      continue;
+    }
+
+    cell += char;
+  }
+
+  row.push(cell.trim());
+  if (row.some((value) => value.length > 0)) {
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+function normalizeCsvHeader(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function looksLikeCsv(input: string) {
+  const firstLine = input.trim().split(/\r?\n/, 1)[0] ?? "";
+  const normalizedHeaders = firstLine.split(",").map(normalizeCsvHeader);
+  return normalizedHeaders.includes("company") && normalizedHeaders.includes("homepage");
+}
+
+function looksLikeCandidateCsv(input: string) {
+  const normalizedStart = input.trimStart().slice(0, 80).toLowerCase();
+  return (
+    looksLikeCsv(input) ||
+    normalizedStart.startsWith("company,") ||
+    normalizedStart.includes("company,homepage,companydomain")
+  );
+}
+
+function parseCandidateCsv(input: string) {
+  const rows = parseCsvRows(input);
+  if (rows.length < 2) {
+    throw new Error("CSV must include a header row and at least one company row.");
+  }
+
+  const headers = rows[0].map(normalizeCsvHeader);
+  const companyIndex = headers.indexOf("company");
+  const homepageIndex = headers.indexOf("homepage");
+
+  if (companyIndex < 0 || homepageIndex < 0) {
+    throw new Error("CSV must include company and homepage columns.");
+  }
+
+  const columnIndex = (name: string) => headers.indexOf(normalizeCsvHeader(name));
+  const careersUrlIndex = columnIndex("careersUrl");
+  const boardUrlIndex = columnIndex("boardUrl");
+  const companyDomainIndex = columnIndex("companyDomain");
+  const sourceHintIndex = columnIndex("sourceHint");
+  const atsIndex = columnIndex("ats");
+  const segmentsIndex = columnIndex("segments");
+  const tierIndex = columnIndex("tier");
+  const originIndex = columnIndex("origin");
+  const notesIndex = columnIndex("notes");
+  const usEvidenceIndex = columnIndex("usEvidence");
+
+  const companies = rows.slice(1).flatMap((row): CandidateImportInput[] => {
+    const company = row[companyIndex]?.trim();
+    const homepage = row[homepageIndex]?.trim();
+
+    if (!company || !homepage) {
+      return [];
+    }
+
+    const sourceHint =
+      sourceHintIndex >= 0
+        ? row[sourceHintIndex]?.trim().toLowerCase()
+        : atsIndex >= 0
+          ? row[atsIndex]?.trim().toLowerCase()
+          : "";
+    const normalizedSourceHint =
+      sourceHint === "greenhouse" || sourceHint === "lever" || sourceHint === "ashby"
+        ? sourceHint
+        : undefined;
+    const tier = tierIndex >= 0 ? row[tierIndex]?.trim() : "";
+    const notes = notesIndex >= 0 ? row[notesIndex]?.trim() : "";
+    const usEvidence = usEvidenceIndex >= 0 ? row[usEvidenceIndex]?.trim() : "";
+    const origin = originIndex >= 0 ? row[originIndex]?.trim() : "";
+    const careersUrl =
+      careersUrlIndex >= 0 && row[careersUrlIndex]?.trim()
+        ? row[careersUrlIndex].trim()
+        : boardUrlIndex >= 0 && row[boardUrlIndex]?.trim()
+          ? row[boardUrlIndex].trim()
+          : "";
+    const segments =
+      segmentsIndex >= 0
+        ? row[segmentsIndex]
+            ?.split("|")
+            .map((segment) => segment.trim())
+            .filter(Boolean)
+        : undefined;
+
+    return [
+      {
+        company,
+        homepage,
+        ...(careersUrl ? { careersUrl } : {}),
+        ...(companyDomainIndex >= 0 && row[companyDomainIndex]?.trim()
+          ? { companyDomain: row[companyDomainIndex].trim().toLowerCase() }
+          : {}),
+        ...(normalizedSourceHint ? { sourceHint: normalizedSourceHint } : {}),
+        ...(segments && segments.length > 0 ? { segments } : {}),
+        ...(origin ? { origin } : { origin: "manual:csv-import" }),
+        ...(notes || usEvidence || tier
+          ? { notes: [notes, usEvidence ? `usEvidence=${usEvidence}` : "", tier ? `tier=${tier}` : ""].filter(Boolean).join(" | ") }
+          : {}),
+      },
+    ];
+  });
+
+  if (!companies.length) {
+    throw new Error("CSV did not include any importable company rows.");
+  }
+
+  return { companies };
+}
+
+function parseCandidateImportPayload(input: string) {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new Error("Paste JSON or CSV before importing.");
+  }
+
+  if (looksLikeCandidateCsv(trimmed)) {
+    return parseCandidateCsv(trimmed);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid JSON.";
+    throw new Error(
+      `${message} If this is a CSV file, refresh the page and upload it again so the CSV importer is active.`,
+    );
+  }
+
+  return parsed && typeof parsed === "object" && "companies" in parsed
+    ? parsed
+    : { companies: Array.isArray(parsed) ? parsed : [parsed] };
+}
+
 function MetricPill({
   label,
   value,
@@ -126,16 +351,17 @@ function CandidateCompaniesPanel() {
   const [companies, setCompanies] = useState<CandidateCompany[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const [sourceForm, setSourceForm] = useState<{
     tier: "top" | "priority" | "growth";
     limit: number;
     focusAreas: string;
     customQuery: string;
-  }>({ tier: "top", limit: 25, focusAreas: "software engineering, product, design, qa", customQuery: "" });
+  }>({ tier: "top", limit: 25, focusAreas: DEFAULT_IT_FOCUS_AREAS, customQuery: "" });
   const [importJson, setImportJson] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
   const [actionState, setActionState] = useState<{
-    kind: "import" | "discover" | "enrich" | "source" | null;
+    kind: "import" | "discover" | "enrich" | "pipeline" | "source" | null;
     pending: boolean;
     message: string | null;
   }>({ kind: null, pending: false, message: null });
@@ -177,18 +403,13 @@ function CandidateCompaniesPanel() {
   async function handleImport() {
     setImportError(null);
 
-    let parsed: unknown;
+    let body: unknown;
     try {
-      parsed = JSON.parse(importJson.trim());
-    } catch {
-      setImportError("Invalid JSON — paste a valid payload.");
+      body = parseCandidateImportPayload(importJson);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "Invalid import payload.");
       return;
     }
-
-    const body =
-      parsed && typeof parsed === "object" && "companies" in parsed
-        ? parsed
-        : { companies: Array.isArray(parsed) ? parsed : [parsed] };
 
     try {
       setActionState({ kind: "import", pending: true, message: "Importing candidates..." });
@@ -215,18 +436,41 @@ function CandidateCompaniesPanel() {
     }
   }
 
+  async function handleImportFile(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      setImportError(null);
+      setImportJson(text);
+      setActionState({
+        kind: "import",
+        pending: false,
+        message: `Loaded ${file.name}. Click Import Candidates to stage it.`,
+      });
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "Could not read import file.");
+    } finally {
+      input.value = "";
+    }
+  }
+
   async function handleDiscover() {
     try {
       setActionState({ kind: "discover", pending: true, message: "Queuing candidate discovery..." });
       const response = await fetch(`${apiBase()}/jobs/candidate-discover`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: 100 }),
       });
       if (!response.ok) throw new Error(`Request failed with ${response.status}`);
-      const result = (await response.json()) as { enqueued?: number; queued?: number };
+      const result = (await response.json()) as { enqueued?: number; queued?: number; candidateCompanies?: number };
       setActionState({
         kind: "discover",
         pending: false,
-        message: `Discovery queued for ${result.enqueued ?? result.queued ?? 0} companies.`,
+        message: `Discovery queued for ${result.enqueued ?? result.queued ?? 0} companies${result.candidateCompanies ? ` out of ${result.candidateCompanies} eligible` : ""}.`,
       });
       await loadCompanies(true);
     } catch (err) {
@@ -281,7 +525,7 @@ function CandidateCompaniesPanel() {
       const response = await fetch(`${apiBase()}/jobs/candidate-companies/enrich`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ limit: 25 }),
+        body: JSON.stringify({ limit: 100 }),
       });
       if (!response.ok) throw new Error(`Request failed with ${response.status}`);
       const result = (await response.json()) as {
@@ -302,6 +546,31 @@ function CandidateCompaniesPanel() {
         kind: "enrich",
         pending: false,
         message: err instanceof Error ? err.message : "Enrichment failed",
+      });
+    }
+  }
+
+  async function handlePipeline() {
+    try {
+      setActionState({ kind: "pipeline", pending: true, message: "Queuing background candidate pipeline..." });
+      const response = await fetch(`${apiBase()}/jobs/candidate-pipeline/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: 1000 }),
+      });
+      if (!response.ok) throw new Error(`Request failed with ${response.status}`);
+      const result = (await response.json()) as { enqueued?: number; candidateCompanies?: number };
+      setActionState({
+        kind: "pipeline",
+        pending: false,
+        message: `Background pipeline queued for ${result.enqueued ?? 0} companies.`,
+      });
+      await loadCompanies(true);
+    } catch (err) {
+      setActionState({
+        kind: "pipeline",
+        pending: false,
+        message: err instanceof Error ? err.message : "Pipeline failed",
       });
     }
   }
@@ -371,7 +640,7 @@ function CandidateCompaniesPanel() {
               type="text"
               value={sourceForm.focusAreas}
               onChange={(e) => setSourceForm((f) => ({ ...f, focusAreas: e.target.value }))}
-              placeholder="software engineering, product, design, qa"
+              placeholder={DEFAULT_IT_FOCUS_AREAS}
               className="w-full rounded-xl border border-line bg-parchment/50 px-3 py-2 text-sm text-ink placeholder:text-sage/50 focus:outline-none focus:ring-1 focus:ring-accent/40"
             />
           </div>
@@ -413,14 +682,14 @@ function CandidateCompaniesPanel() {
           <div className="flex-1">
             <h2 className="text-ink text-sm font-semibold tracking-tight mb-1">Import Candidates</h2>
             <p className="text-sage text-xs leading-5 mb-3">
-              Paste a JSON payload — either a{" "}
+              Paste JSON or CSV. Duplicates are handled by normalized company, homepage, and domain. Use either a{" "}
               <code className="font-mono bg-parchment px-1 rounded">{"{ companies: [...] }"}</code>{" "}
-              object or a bare array of company objects.
+              object, a bare array, or CSV with company/homepage columns.
             </p>
             <textarea
               value={importJson}
               onChange={(e) => setImportJson(e.target.value)}
-              placeholder={'[\n  {\n    "company": "Example AI",\n    "homepage": "https://example.ai",\n    "sourceHint": "ashby",\n    "confidence": 0.82\n  }\n]'}
+              placeholder={"company,homepage,companyDomain,careersUrl,sourceHint,segments,tier,origin,notes\nExample AI,https://example.ai,example.ai,,greenhouse,ai|software engineering,priority,manual:csv-import,AI infrastructure with US roles"}
               rows={7}
               className="w-full rounded-xl border border-line bg-parchment/50 px-4 py-3 text-xs font-mono text-ink placeholder:text-sage/60 focus:outline-none focus:ring-1 focus:ring-accent/40 resize-y"
             />
@@ -429,6 +698,21 @@ function CandidateCompaniesPanel() {
             ) : null}
           </div>
           <div className="flex flex-col gap-3 md:pt-8 md:min-w-[200px]">
+            <input
+              ref={importFileInputRef}
+              type="file"
+              accept=".csv,.json,text/csv,application/json"
+              onChange={(event) => void handleImportFile(event)}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => importFileInputRef.current?.click()}
+              disabled={actionState.pending}
+              className="inline-flex items-center justify-center rounded-full border border-line px-4 py-2.5 text-sm font-medium text-ink transition-all hover:bg-parchment active:scale-[0.99] disabled:cursor-wait disabled:opacity-60"
+            >
+              Choose CSV/JSON
+            </button>
             <button
               type="button"
               onClick={() => void handleImport()}
@@ -472,6 +756,21 @@ function CandidateCompaniesPanel() {
                 </span>
               ) : (
                 "Run Discovery"
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handlePipeline()}
+              disabled={actionState.pending && actionState.kind === "pipeline"}
+              className="inline-flex items-center justify-center rounded-full bg-[#1a2018] px-4 py-2.5 text-sm font-medium text-white transition-all hover:bg-[#242b21] active:scale-[0.99] disabled:cursor-wait disabled:opacity-60"
+            >
+              {actionState.pending && actionState.kind === "pipeline" ? (
+                <span className="inline-flex items-center gap-2">
+                  <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  Queuing...
+                </span>
+              ) : (
+                "Run Background Pipeline"
               )}
             </button>
           </div>
@@ -654,7 +953,7 @@ function CandidateBoardsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [boardSourceForm, setBoardSourceForm] = useState({
     limit: 25,
-    focusAreas: "software engineering, product, design, qa",
+    focusAreas: DEFAULT_IT_FOCUS_AREAS,
     customQuery: "",
   });
   const [boardSourceResult, setBoardSourceResult] = useState<BoardSourceResult | null>(null);
@@ -836,7 +1135,7 @@ function CandidateBoardsPanel() {
               type="text"
               value={boardSourceForm.focusAreas}
               onChange={(e) => setBoardSourceForm((f) => ({ ...f, focusAreas: e.target.value }))}
-              placeholder="software engineering, product, design, qa"
+              placeholder={DEFAULT_IT_FOCUS_AREAS}
               className="w-full rounded-xl border border-line bg-parchment/50 px-3 py-2 text-sm text-ink placeholder:text-sage/50 focus:outline-none focus:ring-1 focus:ring-accent/40"
             />
           </div>
@@ -995,8 +1294,8 @@ function CandidateBoardsPanel() {
           <div>
             <h2 className="text-ink text-sm font-semibold tracking-tight">Staging Actions</h2>
             <p className="text-sage text-xs mt-1 leading-5">
-              Validate discovered boards to confirm they are accessible, then promote validated
-              boards into the tracked board registry.
+              Manual board sourcing leaves validated boards here for promotion. The background pipeline
+              validates and promotes matching boards automatically.
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
@@ -1047,7 +1346,7 @@ function CandidateBoardsPanel() {
           <p className="text-sage text-xs mt-1">
             {loading
               ? "Loading candidate boards..."
-              : `${boards.length} board${boards.length === 1 ? "" : "s"} in staging`}
+              : `${boards.length} candidate board${boards.length === 1 ? "" : "s"} tracked`}
           </p>
         </div>
 
@@ -1138,7 +1437,184 @@ function CandidateBoardsPanel() {
   );
 }
 
-type PipelineTab = "companies" | "boards";
+function ResearchBacklogPanel() {
+  const [companies, setCompanies] = useState<CandidateCompany[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  async function loadBacklog(silent = false) {
+    try {
+      if (!silent) setLoading(true);
+      setError(null);
+      const response = await fetch(`${apiBase()}/jobs/candidate-research-backlog`, {
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error(`Request failed with ${response.status}`);
+      const payload = (await response.json()) as CandidateCompany[];
+      setCompanies(payload);
+    } catch (err) {
+      if (!silent) {
+        setError(err instanceof Error ? err.message : "Unknown error");
+        setCompanies([]);
+      }
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadBacklog();
+
+    const interval = window.setInterval(() => {
+      if (!cancelled) void loadBacklog(true);
+    }, 8000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  const stats = useMemo(() => {
+    const byKind = companies.reduce<Record<string, number>>((acc, company) => {
+      const kind = classifyResearchBacklog(company);
+      acc[kind] = (acc[kind] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    return {
+      total: companies.length,
+      direct: byKind["Direct Careers"] ?? 0,
+      retry: byKind["Retry Supported ATS"] ?? 0,
+      blocked: byKind.Blocked ?? 0,
+      byKind,
+    };
+  }, [companies]);
+
+  return (
+    <div className="space-y-6">
+      {error ? (
+        <section className="bg-card rounded-2xl p-6 shadow-[0_2px_12px_rgba(26,32,24,0.06)]">
+          <p className="text-sm text-red-700">Could not load research backlog: {error}</p>
+        </section>
+      ) : null}
+
+      <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <MetricPill label="Backlog Items" value={stats.total} tone="neutral" />
+        <MetricPill label="Direct Careers" value={stats.direct} tone="info" />
+        <MetricPill label="Retry ATS" value={stats.retry} tone="warning" />
+        <MetricPill label="Blocked" value={stats.blocked} tone="danger" />
+      </section>
+
+      <section className="bg-card rounded-2xl p-5 shadow-[0_2px_12px_rgba(26,32,24,0.06)]">
+        <h2 className="text-ink text-sm font-semibold tracking-tight mb-1">Research Backlog</h2>
+        <p className="text-sage text-xs leading-5">
+          These companies are out of active staging. Keep them here for future ATS adapters, direct-career ingestion, or selective retries.
+        </p>
+      </section>
+
+      <section className="bg-card rounded-2xl shadow-[0_2px_12px_rgba(26,32,24,0.06)] overflow-hidden">
+        <div className="px-6 py-5 border-b border-line">
+          <h2 className="text-ink text-sm font-semibold tracking-tight">Backlog Companies</h2>
+          <p className="text-sage text-xs mt-1">
+            {loading
+              ? "Loading research backlog..."
+              : `${companies.length} compan${companies.length === 1 ? "y" : "ies"} outside active staging`}
+          </p>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[980px]">
+            <thead>
+              <tr className="text-left text-[11px] uppercase tracking-[0.14em] text-sage">
+                <th className="px-6 py-4 font-medium">Company</th>
+                <th className="px-4 py-4 font-medium">Kind</th>
+                <th className="px-4 py-4 font-medium">Homepage</th>
+                <th className="px-4 py-4 font-medium">Careers URL</th>
+                <th className="px-4 py-4 font-medium">Status</th>
+                <th className="px-4 py-4 font-medium">Last Checked</th>
+                <th className="px-4 py-4 font-medium">Signal</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td colSpan={7} className="px-6 py-8 text-center text-sm text-sage">
+                    Loading...
+                  </td>
+                </tr>
+              ) : companies.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-6 py-8 text-center text-sm text-sage">
+                    No research backlog yet.
+                  </td>
+                </tr>
+              ) : (
+                companies.map((company) => {
+                  const tone = companyStatusTone(company.status);
+                  const kind = classifyResearchBacklog(company);
+
+                  return (
+                    <tr key={company.id} className="border-t border-line/70 align-top">
+                      <td className="px-6 py-4">
+                        <p className="text-ink text-sm font-medium">{company.company}</p>
+                        {company.companyDomain ? (
+                          <p className="text-sage text-xs mt-0.5">{company.companyDomain}</p>
+                        ) : null}
+                      </td>
+                      <td className="px-4 py-4 text-sm text-ink">{kind}</td>
+                      <td className="px-4 py-4 text-xs">
+                        <a
+                          href={company.homepage}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-accent hover:underline truncate max-w-[150px] block"
+                        >
+                          {company.homepage.replace(/^https?:\/\//, "")}
+                        </a>
+                      </td>
+                      <td className="px-4 py-4 text-xs">
+                        {company.careersUrl ? (
+                          <a
+                            href={company.careersUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-accent hover:underline truncate max-w-[180px] block"
+                          >
+                            {company.careersUrl.replace(/^https?:\/\//, "")}
+                          </a>
+                        ) : (
+                          <span className="text-sage">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-4">
+                        <span
+                          className="inline-flex rounded-full px-2.5 py-1 text-xs font-medium"
+                          style={{ background: tone.bg, color: tone.color }}
+                        >
+                          {tone.label}
+                        </span>
+                      </td>
+                      <td className="px-4 py-4 text-sm text-sage">
+                        {formatRelativeish(company.lastDiscoveredAt)}
+                      </td>
+                      <td className="px-4 py-4 text-xs text-sage max-w-[240px]">
+                        <span className="line-clamp-3">{company.lastDiscoveryError ?? company.notes ?? "—"}</span>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+type PipelineTab = "companies" | "boards" | "backlog";
 
 export function CandidatePipelineShell() {
   const [tab, setTab] = useState<PipelineTab>("companies");
@@ -1170,9 +1646,27 @@ export function CandidatePipelineShell() {
         >
           Candidate Boards
         </button>
+        <button
+          type="button"
+          onClick={() => setTab("backlog")}
+          className="rounded-xl px-5 py-2 text-sm font-medium transition-all"
+          style={
+            tab === "backlog"
+              ? { background: "#1a2018", color: "#ffffff" }
+              : { color: "#5a6455" }
+          }
+        >
+          Research Backlog
+        </button>
       </div>
 
-      {tab === "companies" ? <CandidateCompaniesPanel /> : <CandidateBoardsPanel />}
+      {tab === "companies" ? (
+        <CandidateCompaniesPanel />
+      ) : tab === "boards" ? (
+        <CandidateBoardsPanel />
+      ) : (
+        <ResearchBacklogPanel />
+      )}
     </div>
   );
 }

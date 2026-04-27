@@ -24,34 +24,45 @@ export type BoardDiscoveryProgress = {
 
 const DISCOVERY_FETCH_TIMEOUT_MS = 8000;
 
-const ATS_PATTERNS: Array<{
-  source: ExternalJobSource;
-  pattern: RegExp;
-}> = [
-  {
-    source: "greenhouse",
-    pattern: /https?:\/\/(?:job-boards|boards)\.greenhouse\.io\/([a-zA-Z0-9_-]+)/g,
-  },
-  {
-    source: "greenhouse",
-    pattern: /https?:\/\/boards-api\.greenhouse\.io\/v1\/boards\/([a-zA-Z0-9_-]+)/g,
-  },
-  {
-    source: "ashby",
-    pattern: /https?:\/\/jobs\.ashbyhq\.com\/([a-zA-Z0-9_-]+)/g,
-  },
-  {
-    source: "ashby",
-    pattern: /https?:\/\/api\.ashbyhq\.com\/posting-api\/job-board\/([a-zA-Z0-9_-]+)/g,
-  },
-  {
-    source: "lever",
-    pattern: /https?:\/\/jobs\.lever\.co\/([a-zA-Z0-9_-]+)/g,
-  },
-  {
-    source: "lever",
-    pattern: /https?:\/\/api\.lever\.co\/v0\/postings\/([a-zA-Z0-9_-]+)/g,
-  },
+const URL_PATTERN = /https?:\/\/[^\s"'<>\\)]+/gi;
+
+const GENERIC_TOKEN_DENYLIST = new Set([
+  "api",
+  "app",
+  "application",
+  "applications",
+  "apply",
+  "ashby",
+  "board",
+  "boards",
+  "careers",
+  "companies",
+  "company",
+  "department",
+  "departments",
+  "embed",
+  "greenhouse",
+  "iframe",
+  "job",
+  "job_app",
+  "job_board",
+  "jobs",
+  "lever",
+  "office",
+  "offices",
+  "p-1",
+  "posting",
+  "postings",
+  "search",
+  "v0",
+  "v1",
+]);
+
+const GENERIC_TOKEN_DENYLIST_PATTERNS = [
+  /^company-[a-z0-9]+$/i,
+  /^example(?:-[a-z0-9]+)?$/i,
+  /^sample(?:-[a-z0-9]+)?$/i,
+  /^test(?:-[a-z0-9]+)?$/i,
 ];
 
 function commonCareerPaths(homepage: string) {
@@ -65,35 +76,139 @@ function commonCareerPaths(homepage: string) {
 }
 
 function normalizeToken(source: ExternalJobSource, token: string) {
-  if (source === "ashby" && token === "app") {
+  const normalizedToken = token.trim();
+  const lowerToken = normalizedToken.toLowerCase();
+
+  if (
+    !normalizedToken ||
+    GENERIC_TOKEN_DENYLIST.has(lowerToken) ||
+    GENERIC_TOKEN_DENYLIST_PATTERNS.some((pattern) => pattern.test(normalizedToken))
+  ) {
     return null;
   }
 
-  return token.trim();
+  if (source === "greenhouse") {
+    return /^[a-z0-9][a-z0-9_-]{2,80}$/i.test(normalizedToken) ? normalizedToken : null;
+  }
+
+  if (source === "lever") {
+    return /^[a-z0-9][a-z0-9-]{1,80}$/i.test(normalizedToken) ? normalizedToken : null;
+  }
+
+  if (source === "ashby") {
+    return /^[a-z0-9][a-z0-9_-]{1,100}$/i.test(normalizedToken) ? normalizedToken : null;
+  }
+
+  return null;
+}
+
+function normalizeText(value?: string | null) {
+  return (value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function isPlausibleCompanyBoard(candidate: DiscoveredBoard, company: TargetCompany) {
+  const normalizedCompany = normalizeText(company.company);
+  const normalizedDomain = normalizeText(company.domain.replace(/\.[a-z]{2,}$/i, ""));
+  const normalizedToken = normalizeText(candidate.boardToken);
+
+  if (!normalizedToken) {
+    return false;
+  }
+
+  return (
+    normalizedToken.includes(normalizedCompany) ||
+    normalizedCompany.includes(normalizedToken) ||
+    normalizedToken.includes(normalizedDomain) ||
+    normalizedDomain.includes(normalizedToken)
+  );
+}
+
+function addDiscoveredBoard(
+  boards: Map<string, DiscoveredBoard>,
+  source: ExternalJobSource,
+  token: string | null,
+  evidenceUrl: string,
+) {
+  if (!token) return;
+
+  const boardToken = normalizeToken(source, token);
+  if (!boardToken) return;
+
+  const key = `${source}:${boardToken}`;
+
+  if (!boards.has(key)) {
+    boards.set(key, {
+      source,
+      boardToken,
+      evidenceUrl,
+    });
+  }
+}
+
+function pathSegment(url: URL, index: number) {
+  return url.pathname.split("/").filter(Boolean)[index] ?? null;
+}
+
+function extractBoardFromUrl(rawUrl: string, evidenceUrl: string) {
+  const boards = new Map<string, DiscoveredBoard>();
+
+  try {
+    const parsed = new URL(rawUrl.replace(/&amp;/g, "&"));
+    const hostname = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+
+    if (hostname === "job-boards.greenhouse.io" || hostname === "boards.greenhouse.io") {
+      const firstSegment = pathSegment(parsed, 0);
+      const embedToken = firstSegment === "embed" ? parsed.searchParams.get("for") : null;
+      addDiscoveredBoard(boards, "greenhouse", embedToken ?? firstSegment, rawUrl);
+    }
+
+    if (hostname === "boards-api.greenhouse.io") {
+      const segments = parsed.pathname.split("/").filter(Boolean);
+      const boardsIndex = segments.findIndex((segment) => segment === "boards");
+      addDiscoveredBoard(boards, "greenhouse", boardsIndex >= 0 ? segments[boardsIndex + 1] : null, rawUrl);
+    }
+
+    if (hostname === "jobs.lever.co") {
+      addDiscoveredBoard(boards, "lever", pathSegment(parsed, 0), rawUrl);
+    }
+
+    if (hostname === "api.lever.co") {
+      const segments = parsed.pathname.split("/").filter(Boolean);
+      const postingsIndex = segments.findIndex((segment) => segment === "postings");
+      addDiscoveredBoard(boards, "lever", postingsIndex >= 0 ? segments[postingsIndex + 1] : null, rawUrl);
+    }
+
+    if (hostname === "jobs.ashbyhq.com") {
+      addDiscoveredBoard(boards, "ashby", pathSegment(parsed, 0), rawUrl);
+    }
+
+    if (hostname === "api.ashbyhq.com") {
+      const segments = parsed.pathname.split("/").filter(Boolean);
+      const boardIndex = segments.findIndex((segment) => segment === "job-board");
+      addDiscoveredBoard(boards, "ashby", boardIndex >= 0 ? segments[boardIndex + 1] : null, rawUrl);
+    }
+  } catch {
+    return [];
+  }
+
+  return Array.from(boards.values()).map((board) => ({
+    ...board,
+    evidenceUrl,
+  }));
 }
 
 export function extractBoardsFromText(text: string, evidenceUrl: string) {
   const boards = new Map<string, DiscoveredBoard>();
 
-  for (const item of ATS_PATTERNS) {
-    const matches = text.matchAll(item.pattern);
+  for (const match of text.matchAll(URL_PATTERN)) {
+    const rawUrl = match[0];
+    if (!rawUrl) continue;
 
-    for (const match of matches) {
-      const rawToken = match[1];
-      if (!rawToken) continue;
-
-      const boardToken = normalizeToken(item.source, rawToken);
-      if (!boardToken) continue;
-
-      const key = `${item.source}:${boardToken}`;
-
-      if (!boards.has(key)) {
-        boards.set(key, {
-          source: item.source,
-          boardToken,
-          evidenceUrl,
-        });
-      }
+    for (const board of extractBoardFromUrl(rawUrl, rawUrl)) {
+      addDiscoveredBoard(boards, board.source, board.boardToken, board.evidenceUrl);
     }
   }
 
@@ -196,7 +311,7 @@ export async function discoverBoardsForCompany(
   });
 
   const directCandidates = extractBoardsFromText(company.careersUrl, company.careersUrl).filter(
-    (candidate) => candidate.source === company.expectedSource,
+    (candidate) => candidate.source === company.expectedSource && isPlausibleCompanyBoard(candidate, company),
   );
 
   if (directCandidates.length) {
@@ -249,6 +364,10 @@ export async function discoverBoardsForCompany(
       const matches = extractBoardsFromText(`${page.url}\n${page.html}`, page.url);
 
       for (const match of matches) {
+        if (!isPlausibleCompanyBoard(match, company)) {
+          continue;
+        }
+
         discovered.set(`${match.source}:${match.boardToken}`, match);
       }
 

@@ -5,9 +5,11 @@ import type { ExternalJobSource } from "@aijobs/types";
 
 import {
   createBoardDiscoveryQueue,
+  createCandidatePipelineQueue,
   createJobsIngestQueue,
   createRedisConnection,
   type BoardDiscoveryPayload,
+  type CandidatePipelinePayload,
   type JobsIngestPayload,
 } from "./jobs-queue";
 
@@ -35,6 +37,7 @@ export class JobsQueueService implements OnModuleDestroy {
   private readonly connection = createRedisConnection();
   private readonly queue = createJobsIngestQueue(this.connection);
   private readonly discoveryQueue = createBoardDiscoveryQueue(this.connection);
+  private readonly candidatePipelineQueue = createCandidatePipelineQueue(this.connection);
 
   async enqueueBoardIngests(payloads: JobsIngestPayload[]) {
     if (!payloads.length) {
@@ -74,8 +77,29 @@ export class JobsQueueService implements OnModuleDestroy {
     }));
   }
 
+  async enqueueCandidatePipelines(payloads: CandidatePipelinePayload[]) {
+    if (!payloads.length) {
+      return [];
+    }
+
+    const jobs = await this.candidatePipelineQueue.addBulk(
+      payloads.map((payload) => ({
+        name: `candidate-pipeline:${payload.companyId}`,
+        data: payload,
+      })),
+    );
+
+    return jobs.map((job) => ({
+      id: job.id,
+      companyId: job.data.companyId,
+    }));
+  }
+
   async getJobStatus(jobId: string) {
-    const job = (await this.queue.getJob(jobId)) ?? (await this.discoveryQueue.getJob(jobId));
+    const job =
+      (await this.queue.getJob(jobId)) ??
+      (await this.discoveryQueue.getJob(jobId)) ??
+      (await this.candidatePipelineQueue.getJob(jobId));
     if (!job) {
       return null;
     }
@@ -92,11 +116,12 @@ export class JobsQueueService implements OnModuleDestroy {
   async getPipelineSnapshot(input?: QueueSnapshotInput) {
     return {
       discovery: await this.buildQueueSnapshot(this.discoveryQueue, input?.discoveryJobIds),
+      candidatePipeline: await this.buildQueueSnapshot(this.candidatePipelineQueue),
       ingest: await this.buildQueueSnapshot(this.queue, input?.ingestJobIds),
     };
   }
 
-  private async buildQueueSnapshot<TPayload extends JobsIngestPayload | BoardDiscoveryPayload>(
+  private async buildQueueSnapshot<TPayload extends JobsIngestPayload | BoardDiscoveryPayload | CandidatePipelinePayload>(
     queue: Queue<TPayload>,
     trackedJobIds?: string[],
   ) {
@@ -163,7 +188,7 @@ export class JobsQueueService implements OnModuleDestroy {
     };
   }
 
-  private async serializeJob<TPayload extends JobsIngestPayload | BoardDiscoveryPayload>(
+  private async serializeJob<TPayload extends JobsIngestPayload | BoardDiscoveryPayload | CandidatePipelinePayload>(
     job: Job<TPayload>,
   ): Promise<QueueJobSummary> {
     return {
@@ -182,6 +207,7 @@ export class JobsQueueService implements OnModuleDestroy {
   }
 
   async onModuleDestroy() {
+    await this.candidatePipelineQueue.close();
     await this.discoveryQueue.close();
     await this.queue.close();
     await this.connection.quit();
