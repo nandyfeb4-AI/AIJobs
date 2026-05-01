@@ -59,6 +59,70 @@ export class UpsertCandidateCompaniesDto {
   companies!: CandidateCompanyInputDto[];
 }
 
+export class CandidateBoardImportInputDto {
+  @IsString()
+  company!: string;
+
+  @IsOptional()
+  @IsUrl()
+  homepage?: string;
+
+  @IsOptional()
+  @IsString()
+  companyDomain?: string;
+
+  @IsOptional()
+  @IsString()
+  ats?: string;
+
+  @IsOptional()
+  @IsString()
+  sourceName?: string;
+
+  @IsString()
+  boardToken!: string;
+
+  @IsOptional()
+  @IsUrl()
+  boardUrl?: string;
+
+  @IsOptional()
+  @IsUrl()
+  evidenceUrl?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  segments?: string[];
+
+  @IsOptional()
+  @IsString()
+  origin?: string;
+
+  @IsOptional()
+  @IsString()
+  notes?: string;
+}
+
+export class UpsertCandidateBoardsDto {
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CandidateBoardImportInputDto)
+  boards!: CandidateBoardImportInputDto[];
+}
+
+export class CandidateBoardValidateDto {
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(500)
+  limit?: number;
+
+  @IsOptional()
+  @IsString()
+  sourceName?: string;
+}
+
 export class CandidateBootstrapDto {
   @IsOptional()
   @IsString()
@@ -129,4 +193,28 @@ export class CandidateBoardSourceDto {
   @IsOptional()
   @IsString()
   customQuery?: string;
+}
+
+export class WorkableXmlFeedIngestDto {
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  limit?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(100)
+  @Max(500000)
+  maxRecords?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(365)
+  freshDays?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  dryRun?: boolean;
 }

@@ -53,9 +53,12 @@ const GENERIC_TOKEN_DENYLIST = new Set([
   "p-1",
   "posting",
   "postings",
+  "recruitee",
   "search",
+  "smartrecruiters",
   "v0",
   "v1",
+  "workable",
 ]);
 
 const GENERIC_TOKEN_DENYLIST_PATTERNS = [
@@ -97,6 +100,18 @@ function normalizeToken(source: ExternalJobSource, token: string) {
 
   if (source === "ashby") {
     return /^[a-z0-9][a-z0-9_-]{1,100}$/i.test(normalizedToken) ? normalizedToken : null;
+  }
+
+  if (source === "workable") {
+    return /^[a-z0-9][a-z0-9-]{1,100}$/i.test(normalizedToken) ? normalizedToken : null;
+  }
+
+  if (source === "smartrecruiters") {
+    return /^[a-z0-9][a-z0-9_-]{1,120}$/i.test(normalizedToken) ? normalizedToken : null;
+  }
+
+  if (source === "recruitee") {
+    return /^[a-z0-9][a-z0-9-]{1,100}$/i.test(normalizedToken) ? normalizedToken : null;
   }
 
   return null;
@@ -190,6 +205,30 @@ function extractBoardFromUrl(rawUrl: string, evidenceUrl: string) {
       const boardIndex = segments.findIndex((segment) => segment === "job-board");
       addDiscoveredBoard(boards, "ashby", boardIndex >= 0 ? segments[boardIndex + 1] : null, rawUrl);
     }
+
+    if (hostname === "apply.workable.com") {
+      addDiscoveredBoard(boards, "workable", pathSegment(parsed, 0), rawUrl);
+    }
+
+    if (hostname === "www.workable.com") {
+      const segments = parsed.pathname.split("/").filter(Boolean);
+      const accountsIndex = segments.findIndex((segment) => segment === "accounts");
+      addDiscoveredBoard(boards, "workable", accountsIndex >= 0 ? segments[accountsIndex + 1] : null, rawUrl);
+    }
+
+    if (hostname === "careers.smartrecruiters.com" || hostname === "jobs.smartrecruiters.com") {
+      addDiscoveredBoard(boards, "smartrecruiters", pathSegment(parsed, 0), rawUrl);
+    }
+
+    if (hostname === "api.smartrecruiters.com") {
+      const segments = parsed.pathname.split("/").filter(Boolean);
+      const companiesIndex = segments.findIndex((segment) => segment === "companies");
+      addDiscoveredBoard(boards, "smartrecruiters", companiesIndex >= 0 ? segments[companiesIndex + 1] : null, rawUrl);
+    }
+
+    if (hostname.endsWith(".recruitee.com") && hostname !== "www.recruitee.com") {
+      addDiscoveredBoard(boards, "recruitee", hostname.split(".")[0] ?? null, rawUrl);
+    }
   } catch {
     return [];
   }
@@ -274,6 +313,33 @@ async function probeBoardCandidate(candidate: DiscoveredBoard) {
       case "ashby":
         response = await fetch(
           `https://api.ashbyhq.com/posting-api/job-board/${candidate.boardToken}`,
+          {
+            redirect: "follow",
+            signal: controller.signal,
+          },
+        );
+        break;
+      case "workable":
+        response = await fetch(
+          `https://www.workable.com/api/accounts/${candidate.boardToken}`,
+          {
+            redirect: "follow",
+            signal: controller.signal,
+          },
+        );
+        break;
+      case "smartrecruiters":
+        response = await fetch(
+          `https://api.smartrecruiters.com/v1/companies/${candidate.boardToken}/postings?limit=1`,
+          {
+            redirect: "follow",
+            signal: controller.signal,
+          },
+        );
+        break;
+      case "recruitee":
+        response = await fetch(
+          `https://${candidate.boardToken}.recruitee.com/api/offers/`,
           {
             redirect: "follow",
             signal: controller.signal,

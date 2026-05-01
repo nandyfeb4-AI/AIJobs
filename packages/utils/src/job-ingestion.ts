@@ -51,6 +51,9 @@ const TARGET_TITLE_PATTERNS = [
   /\bfront[- ]end engineer\b/i,
   /\bfrontend developer\b/i,
   /\bfront[- ]end developer\b/i,
+  /\buser interface developer\b/i,
+  /\bui developer\b/i,
+  /\binteractive developer\b/i,
   /\bfull[- ]stack engineer\b/i,
   /\bfull[- ]stack developer\b/i,
   /\bandroid engineer\b/i,
@@ -61,6 +64,16 @@ const TARGET_TITLE_PATTERNS = [
   /\bpython developer\b/i,
   /\b\.net developer\b/i,
   /\breact developer\b/i,
+  /\bprincipal engineer\b/i,
+  /\bstaff engineer\b/i,
+  /\bsenior staff engineer\b/i,
+  /\blead engineer\b/i,
+  /\bdirector of engineering\b/i,
+  /\bengineering manager\b/i,
+  /\bmanager,\s*engineering\b/i,
+  /\bhead of engineering\b/i,
+  /\bforward deployed engineer\b/i,
+  /\bgtm engineer\b/i,
   /\bplatform engineer\b/i,
   /\binfrastructure engineer\b/i,
   /\bcloud engineer\b/i,
@@ -85,6 +98,7 @@ const TARGET_TITLE_PATTERNS = [
   /\bnoc analyst\b/i,
   /\bgrc analyst\b/i,
   /\banalytics engineer\b/i,
+  /\bdata engineering\b/i,
   /\bsite reliability engineer\b/i,
   /\bsre\b/i,
   /\bdevops engineer\b/i,
@@ -100,6 +114,10 @@ const TARGET_TITLE_PATTERNS = [
   /\bmachine learning engineer\b/i,
   /\bml engineer\b/i,
   /\bai engineer\b/i,
+  /\bdeveloper advocate\b/i,
+  /\bdeveloper relations\b/i,
+  /\bdevrel\b/i,
+  /\btechnical writer\b/i,
   /\bdesigner\b/i,
   /\bproduct designer\b/i,
   /\bux designer\b/i,
@@ -108,6 +126,7 @@ const TARGET_TITLE_PATTERNS = [
   /\bdesign engineer\b/i,
   /\bqa engineer\b/i,
   /\bqa analyst\b/i,
+  /\bqa mobile\b/i,
   /\bquality engineer\b/i,
   /\bquality assurance engineer\b/i,
   /\bsdet\b/i,
@@ -124,8 +143,11 @@ const TARGET_TITLE_PATTERNS = [
   /\bbusiness analyst\b/i,
   /\bsystems analyst\b/i,
   /\bimplementation consultant\b/i,
+  /\bimplementation engineer\b/i,
   /\bsolutions consultant\b/i,
   /\bsolutions engineer\b/i,
+  /\bsolution architect\b/i,
+  /\bsolutions architect\b/i,
   /\bintegration engineer\b/i,
   /\bsalesforce developer\b/i,
   /\bsalesforce administrator\b/i,
@@ -224,17 +246,70 @@ const US_STATE_ABBREVIATIONS = [
 ];
 
 const NON_US_LOCATION_PATTERNS = [
+  /\bargentina\b/i,
+  /\bbrazil\b/i,
   /\bcanada\b/i,
   /\bcanadian\b/i,
+  /\bcolombia\b/i,
+  /\bfrance\b/i,
+  /\bgermany\b/i,
   /\buk\b/i,
   /\bunited kingdom\b/i,
   /\blondon\b/i,
   /\bindia\b/i,
+  /\bisrael\b/i,
+  /\bmalaysia\b/i,
+  /\bnetherlands\b/i,
+  /\bpoland\b/i,
+  /\bromania\b/i,
   /\bsingapore\b/i,
+  /\bspain\b/i,
+  /\bsweden\b/i,
   /\beurope\b/i,
   /\beu\b/i,
   /\baustralia\b/i,
 ];
+
+const NON_US_COUNTRY_CODES = new Set([
+  "ae",
+  "ar",
+  "at",
+  "au",
+  "be",
+  "br",
+  "ca",
+  "ch",
+  "cl",
+  "cn",
+  "co",
+  "cz",
+  "de",
+  "dk",
+  "es",
+  "fi",
+  "fr",
+  "gb",
+  "hk",
+  "ie",
+  "il",
+  "in",
+  "it",
+  "jp",
+  "kr",
+  "mx",
+  "my",
+  "nl",
+  "no",
+  "nz",
+  "pl",
+  "pt",
+  "ro",
+  "se",
+  "sg",
+  "th",
+  "uk",
+  "za",
+]);
 
 export function isTargetRole(job: JobLike) {
   const searchable = [job.title, job.department, job.team].filter(Boolean).join(" ");
@@ -254,6 +329,14 @@ export function isUsRelevantJob(job: JobLike) {
     return false;
   }
 
+  if (hasExplicitNonUsCountryCode(job.location)) {
+    return false;
+  }
+
+  if (NON_US_LOCATION_PATTERNS.some((pattern) => pattern.test(searchable))) {
+    return false;
+  }
+
   if (US_LOCATION_PATTERNS.some((pattern) => pattern.test(searchable))) {
     return true;
   }
@@ -262,16 +345,32 @@ export function isUsRelevantJob(job: JobLike) {
     return true;
   }
 
-  if (NON_US_LOCATION_PATTERNS.some((pattern) => pattern.test(searchable))) {
-    return false;
-  }
-
   const abbreviationPattern = new RegExp(
-    `(?:,|\\b)(?:${US_STATE_ABBREVIATIONS.join("|")})(?:\\b|$)`,
+    `(?:^|,\\s*)(?:${US_STATE_ABBREVIATIONS.join("|")})(?=\\s*,|\\s*$)`,
     "i",
   );
 
-  return abbreviationPattern.test(searchable);
+  return abbreviationPattern.test(job.location ?? "");
+}
+
+function hasExplicitNonUsCountryCode(location?: string | null) {
+  if (!location) {
+    return false;
+  }
+
+  const tokens = location
+    .toLowerCase()
+    .split(/[,\s·/()]+/)
+    .map((token) => token.trim().replace(/[^a-z.]/g, ""))
+    .filter(Boolean)
+    .filter((token) => !["remote", "hybrid", "onsite"].includes(token));
+
+  const lastToken = tokens[tokens.length - 1];
+  if (!lastToken || lastToken === "us" || lastToken === "usa" || lastToken === "u.s." || lastToken === "united states") {
+    return false;
+  }
+
+  return NON_US_COUNTRY_CODES.has(lastToken);
 }
 
 export function compareJobsByPostedAt(left: JobLike, right: JobLike) {

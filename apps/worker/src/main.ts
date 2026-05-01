@@ -9,6 +9,9 @@ import type { AggregatedJob, ExternalJobSource } from "@aijobs/types";
 import { AshbyAdapter } from "../../api/src/jobs/adapters/ashby.adapter";
 import { GreenhouseAdapter } from "../../api/src/jobs/adapters/greenhouse.adapter";
 import { LeverAdapter } from "../../api/src/jobs/adapters/lever.adapter";
+import { RecruiteeAdapter } from "../../api/src/jobs/adapters/recruitee.adapter";
+import { SmartRecruitersAdapter } from "../../api/src/jobs/adapters/smartrecruiters.adapter";
+import { WorkableAdapter } from "../../api/src/jobs/adapters/workable.adapter";
 import { discoverBoardsForCompany, extractBoardsFromText } from "../../api/src/jobs/board-discovery";
 import { getStarterBoardMetadata } from "../../api/src/jobs/board-catalog";
 import { getTargetCompanies, getTargetCompanyById } from "../../api/src/jobs/target-company-catalog";
@@ -31,6 +34,9 @@ const adapters: Record<ExternalJobSource, { fetchJobs(boardToken: string): Promi
   greenhouse: new GreenhouseAdapter(),
   lever: new LeverAdapter(),
   ashby: new AshbyAdapter(),
+  workable: new WorkableAdapter(),
+  smartrecruiters: new SmartRecruitersAdapter(),
+  recruitee: new RecruiteeAdapter(),
   adzuna: {
     async fetchJobs() {
       return [];
@@ -97,13 +103,23 @@ function targetCompanyDomainForBoard(source: ExternalJobSource, boardToken: stri
 }
 
 function inferExpectedSource(sourceHint?: string | null, careersUrl?: string | null): ExternalJobSource {
-  if (sourceHint === "greenhouse" || sourceHint === "lever" || sourceHint === "ashby") {
+  if (
+    sourceHint === "greenhouse" ||
+    sourceHint === "lever" ||
+    sourceHint === "ashby" ||
+    sourceHint === "workable" ||
+    sourceHint === "smartrecruiters" ||
+    sourceHint === "recruitee"
+  ) {
     return sourceHint;
   }
 
   const url = careersUrl?.toLowerCase() ?? "";
   if (url.includes("lever.co")) return "lever";
   if (url.includes("ashbyhq.com")) return "ashby";
+  if (url.includes("workable.com")) return "workable";
+  if (url.includes("smartrecruiters.com")) return "smartrecruiters";
+  if (url.includes("recruitee.com")) return "recruitee";
   return "greenhouse";
 }
 

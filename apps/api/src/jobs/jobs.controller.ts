@@ -3,13 +3,16 @@ import { Body, Controller, Get, Inject, Post, Query } from "@nestjs/common";
 import type { ExternalJobSource } from "@aijobs/types";
 
 import {
+  CandidateBoardValidateDto,
   CandidateBoardSourceDto,
   CandidateBootstrapDto,
   CandidateDiscoverDto,
   CandidateEnrichDto,
   CandidatePipelineDto,
   CandidateSourceDto,
+  UpsertCandidateBoardsDto,
   UpsertCandidateCompaniesDto,
+  WorkableXmlFeedIngestDto,
 } from "./jobs.dto";
 import { JobsQueueService } from "./jobs-queue.service";
 import { JobsService } from "./jobs.service";
@@ -164,9 +167,16 @@ export class JobsController {
     return this.jobsService.listCandidateBoards();
   }
 
+  @Post("candidate-boards/import")
+  async upsertCandidateBoards(
+    @Body() body: UpsertCandidateBoardsDto,
+  ) {
+    return this.jobsService.upsertCandidateBoards(body.boards);
+  }
+
   @Post("candidate-boards/validate")
-  async validateCandidateBoards() {
-    return this.jobsService.validateCandidateBoards();
+  async validateCandidateBoards(@Body() body?: CandidateBoardValidateDto) {
+    return this.jobsService.validateCandidateBoards(body);
   }
 
   @Post("candidate-boards/source")
@@ -183,6 +193,13 @@ export class JobsController {
   @Post("candidate-boards/promote")
   async promoteCandidateBoards() {
     return this.jobsService.promoteValidatedCandidateBoards();
+  }
+
+  @Post("feeds/workable-xml/ingest")
+  async ingestWorkableXmlFeed(
+    @Body() body: WorkableXmlFeedIngestDto,
+  ) {
+    return this.jobsService.ingestWorkableXmlFeed(body);
   }
 
   @Post("verify-unverified")

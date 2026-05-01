@@ -25,18 +25,23 @@ type RegistryStats = {
       synced7d: number;
       synced14d: number;
       synced30d: number;
+      synced60d: number;
       posted24h: number;
       posted7d: number;
       posted14d: number;
       posted30d: number;
+      posted60d: number;
       unknownPostedAt: number;
     };
+    postedAgeBuckets: CountRow[];
+    syncAgeBuckets: CountRow[];
     bySource: CountRow[];
     byCategory: CountRow[];
     byWorkMode: CountRow[];
     byLocation: CountRow[];
     topCompanies: CountRow[];
     recent: Array<{
+      sourceKey: string;
       sourceName: string;
       boardToken: string | null;
       title: string;
@@ -62,6 +67,36 @@ type RegistryStats = {
     totalTargetJobsLastRun: number;
     totalPersistedJobsReported: number;
   };
+};
+
+type WorkableXmlFeedResult = {
+  sourceName: "workable_xml";
+  feedUrl: string;
+  dryRun: boolean;
+  limit: number;
+  maxRecords: number;
+  freshDays: number;
+  seen: number;
+  parsed: number;
+  fresh: number;
+  usRelevant: number;
+  targetRole: number;
+  inserted: number;
+  updated: number;
+  persisted: number;
+  skippedOld: number;
+  skippedMissingRequired: number;
+  skippedNonUs: number;
+  skippedNonTarget: number;
+  skippedDuplicate: number;
+  skippedPersistError: number;
+  persistErrors: Array<{
+    sourceKey: string;
+    title: string;
+    company: string;
+    message: string;
+  }>;
+  stoppedReason: "limit_reached" | "max_records_reached" | "feed_complete";
 };
 
 function apiBase() {
@@ -162,6 +197,12 @@ export function JobRegistryShell() {
   const [stats, setStats] = useState<RegistryStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [feedLimit, setFeedLimit] = useState(1000);
+  const [feedMaxRecords, setFeedMaxRecords] = useState(50000);
+  const [feedFreshDays, setFeedFreshDays] = useState(30);
+  const [feedRunning, setFeedRunning] = useState<"dry-run" | "ingest" | null>(null);
+  const [feedResult, setFeedResult] = useState<WorkableXmlFeedResult | null>(null);
+  const [feedError, setFeedError] = useState<string | null>(null);
 
   async function loadStats(silent = false) {
     try {
@@ -194,9 +235,47 @@ export function JobRegistryShell() {
     };
   }, []);
 
+  async function runWorkableXmlFeed(dryRun: boolean) {
+    try {
+      setFeedRunning(dryRun ? "dry-run" : "ingest");
+      setFeedError(null);
+      setFeedResult(null);
+
+      const response = await fetch(`${apiBase()}/jobs/feeds/workable-xml/ingest`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          dryRun,
+          limit: feedLimit,
+          maxRecords: feedMaxRecords,
+          freshDays: feedFreshDays,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Request failed with ${response.status}`);
+      }
+
+      const result = (await response.json()) as WorkableXmlFeedResult;
+      setFeedResult(result);
+
+      if (!dryRun) {
+        await loadStats(true);
+      }
+    } catch (nextError) {
+      setFeedError(nextError instanceof Error ? nextError.message : "Unknown error");
+    } finally {
+      setFeedRunning(null);
+    }
+  }
+
   const activeJobs = stats?.jobs.active ?? 0;
   const synced7d = stats?.jobs.freshness.synced7d ?? 0;
-  const posted30d = stats?.jobs.freshness.posted30d ?? 0;
+  const posted60d = stats?.jobs.freshness.posted60d ?? 0;
+  const postedOlderThan60 =
+    stats?.jobs.postedAgeBuckets.find((row) => row.label === "60+ days")?.count ?? 0;
   const latestIncrease = stats?.jobs.latestIncrease.total ?? 0;
   const latestIncreaseCaption = stats?.jobs.latestIncrease.bySource.length
     ? stats.jobs.latestIncrease.bySource
@@ -250,9 +329,9 @@ export function JobRegistryShell() {
           tone="info"
         />
         <StatTile
-          label="Posted 30D"
-          value={loading && !stats ? "..." : formatNumber(posted30d)}
-          caption={`${formatPercent(posted30d, activeJobs)} with recent posting dates`}
+          label="Posted 60D"
+          value={loading && !stats ? "..." : formatNumber(posted60d)}
+          caption={`${formatPercent(posted60d, activeJobs)} inventory window`}
         />
         <StatTile
           label="Working Boards"
@@ -274,6 +353,28 @@ export function JobRegistryShell() {
         <Breakdown title="Location Signal" rows={stats?.jobs.byLocation ?? []} total={activeJobs} />
       </section>
 
+      <section className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_260px] gap-4">
+        <Breakdown title="Posted Age Buckets" rows={stats?.jobs.postedAgeBuckets ?? []} total={activeJobs} limit={6} />
+        <Breakdown title="Last Sync Buckets" rows={stats?.jobs.syncAgeBuckets ?? []} total={activeJobs} limit={6} />
+        <section className="bg-card rounded-2xl p-5 shadow-[0_2px_12px_rgba(26,32,24,0.06)]">
+          <h2 className="text-ink text-sm font-semibold tracking-tight mb-4">Inventory Window</h2>
+          <div className="space-y-4">
+            <div>
+              <p className="text-sage text-[10px] uppercase tracking-[0.14em]">Core 30D</p>
+              <p className="text-ink text-2xl font-semibold tabular-nums">
+                {formatNumber(stats?.jobs.freshness.posted30d ?? 0)}
+              </p>
+              <p className="text-sage text-xs">{formatPercent(stats?.jobs.freshness.posted30d ?? 0, activeJobs)} active jobs</p>
+            </div>
+            <div className="border-t border-line pt-4">
+              <p className="text-sage text-[10px] uppercase tracking-[0.14em]">Expansion 60D</p>
+              <p className="text-ink text-2xl font-semibold tabular-nums">{formatNumber(posted60d)}</p>
+              <p className="text-sage text-xs">{formatNumber(postedOlderThan60)} older than 60D</p>
+            </div>
+          </div>
+        </section>
+      </section>
+
       <section className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.3fr)_minmax(340px,0.7fr)] gap-4">
         <section className="bg-card rounded-2xl shadow-[0_2px_12px_rgba(26,32,24,0.06)] overflow-hidden">
           <div className="px-6 py-5 border-b border-line">
@@ -293,7 +394,7 @@ export function JobRegistryShell() {
               </thead>
               <tbody>
                 {(stats?.jobs.recent ?? []).map((job) => (
-                  <tr key={`${job.sourceName}:${job.boardToken}:${job.title}:${job.company}`} className="border-t border-line/70">
+                  <tr key={job.sourceKey} className="border-t border-line/70">
                     <td className="px-6 py-4">
                       <p className="text-sm font-medium text-ink">{job.title}</p>
                       <p className="text-xs text-sage mt-1">{job.boardToken ?? "unknown board"}</p>
@@ -317,6 +418,118 @@ export function JobRegistryShell() {
         </section>
 
         <section className="space-y-4">
+          <section className="bg-card rounded-2xl p-5 shadow-[0_2px_12px_rgba(26,32,24,0.06)]">
+            <div className="mb-4">
+              <p className="text-sage text-[10px] uppercase tracking-[0.14em] mb-2">Feed Ingestion</p>
+              <h2 className="text-ink text-sm font-semibold tracking-tight">Workable XML</h2>
+              <p className="text-sage text-xs mt-1">
+                Separate from board tracking. Streams the public Workable feed, then keeps only fresh US target-role jobs.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3">
+              <label className="block">
+                <span className="text-[10px] uppercase tracking-[0.12em] text-sage">Fresh Days</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={feedFreshDays}
+                  onChange={(event) => setFeedFreshDays(Number(event.target.value))}
+                  className="mt-1 w-full rounded-lg border border-line bg-parchment px-3 py-2 text-sm text-ink outline-none"
+                />
+              </label>
+              <label className="block">
+                <span className="text-[10px] uppercase tracking-[0.12em] text-sage">Limit</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={10000}
+                  value={feedLimit}
+                  onChange={(event) => setFeedLimit(Number(event.target.value))}
+                  className="mt-1 w-full rounded-lg border border-line bg-parchment px-3 py-2 text-sm text-ink outline-none"
+                />
+              </label>
+              <label className="block">
+                <span className="text-[10px] uppercase tracking-[0.12em] text-sage">Max Scan</span>
+                <input
+                  type="number"
+                  min={100}
+                  max={500000}
+                  value={feedMaxRecords}
+                  onChange={(event) => setFeedMaxRecords(Number(event.target.value))}
+                  className="mt-1 w-full rounded-lg border border-line bg-parchment px-3 py-2 text-sm text-ink outline-none"
+                />
+              </label>
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => void runWorkableXmlFeed(true)}
+                disabled={feedRunning !== null}
+                className="rounded-full border border-line px-4 py-2 text-sm font-medium text-ink disabled:opacity-50"
+              >
+                {feedRunning === "dry-run" ? "Checking..." : "Dry Run"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void runWorkableXmlFeed(false)}
+                disabled={feedRunning !== null}
+                className="rounded-full bg-ink px-4 py-2 text-sm font-medium text-card disabled:opacity-50"
+              >
+                {feedRunning === "ingest" ? "Ingesting..." : "Ingest Jobs"}
+              </button>
+            </div>
+
+            {feedError ? (
+              <p className="mt-4 text-xs text-red-700">Workable XML failed: {feedError}</p>
+            ) : null}
+
+            {feedResult ? (
+              <div className="mt-4 rounded-xl border border-line bg-parchment p-4">
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <p className="text-sage uppercase tracking-[0.12em]">Matched</p>
+                    <p className="text-ink text-lg font-semibold tabular-nums">
+                      {formatNumber(feedResult.persisted)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-sage uppercase tracking-[0.12em]">Mode</p>
+                    <p className="text-ink text-lg font-semibold">{feedResult.dryRun ? "Dry run" : "Saved"}</p>
+                  </div>
+                  <div>
+                    <p className="text-sage uppercase tracking-[0.12em]">Inserted</p>
+                    <p className="text-ink font-medium tabular-nums">{formatNumber(feedResult.inserted)}</p>
+                  </div>
+                  <div>
+                    <p className="text-sage uppercase tracking-[0.12em]">Updated</p>
+                    <p className="text-ink font-medium tabular-nums">{formatNumber(feedResult.updated)}</p>
+                  </div>
+                  <div>
+                    <p className="text-sage uppercase tracking-[0.12em]">Duplicates</p>
+                    <p className="text-ink font-medium tabular-nums">{formatNumber(feedResult.skippedDuplicate)}</p>
+                  </div>
+                  <div>
+                    <p className="text-sage uppercase tracking-[0.12em]">Write Errors</p>
+                    <p className="text-ink font-medium tabular-nums">{formatNumber(feedResult.skippedPersistError)}</p>
+                  </div>
+                </div>
+                <p className="text-sage text-xs mt-3">
+                  Scanned {formatNumber(feedResult.seen)} records. Skipped {formatNumber(feedResult.skippedOld)} old,{" "}
+                  {formatNumber(feedResult.skippedNonUs)} non-US, and {formatNumber(feedResult.skippedNonTarget)} non-target.
+                </p>
+                {feedResult.persistErrors.length ? (
+                  <p className="text-red-700 text-xs mt-3">
+                    First write issue: {feedResult.persistErrors[0]?.company} / {feedResult.persistErrors[0]?.title} -{" "}
+                    {feedResult.persistErrors[0]?.message}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+
           <section className="bg-card rounded-2xl p-5 shadow-[0_2px_12px_rgba(26,32,24,0.06)]">
             <h2 className="text-ink text-sm font-semibold tracking-tight mb-4">Board Sync Freshness</h2>
             <div className="grid grid-cols-2 gap-3">

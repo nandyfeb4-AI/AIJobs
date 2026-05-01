@@ -59,6 +59,18 @@ type CandidateImportInput = {
   notes?: string;
 };
 
+type CandidateBoardImportInput = {
+  company: string;
+  homepage?: string;
+  companyDomain?: string;
+  ats: string;
+  boardUrl: string;
+  boardToken: string;
+  segments?: string[];
+  origin?: string;
+  notes?: string;
+};
+
 function apiBase() {
   return process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api";
 }
@@ -75,6 +87,16 @@ const DEFAULT_IT_FOCUS_AREAS = [
   "erp crm",
   "design",
 ].join(", ");
+
+const BOARD_VALIDATION_SOURCES = [
+  "all",
+  "workable",
+  "smartrecruiters",
+  "recruitee",
+  "greenhouse",
+  "lever",
+  "ashby",
+] as const;
 
 function formatRelativeish(timestamp?: string | null) {
   if (!timestamp) return "—";
@@ -131,7 +153,14 @@ function classifyResearchBacklog(company: CandidateCompany) {
   if (url.includes("workable.com")) return "Workable";
   if (url.includes("teamtailor.com")) return "Teamtailor";
   if (url.includes("rippling.com")) return "Rippling";
-  if (url.includes("greenhouse.io") || url.includes("lever.co") || url.includes("ashbyhq.com")) {
+  if (
+    url.includes("greenhouse.io") ||
+    url.includes("lever.co") ||
+    url.includes("ashbyhq.com") ||
+    url.includes("workable.com") ||
+    url.includes("smartrecruiters.com") ||
+    url.includes("recruitee.com")
+  ) {
     return "Retry Supported ATS";
   }
   if (company.careersUrl) return "Direct Careers";
@@ -249,7 +278,12 @@ function parseCandidateCsv(input: string) {
           ? row[atsIndex]?.trim().toLowerCase()
           : "";
     const normalizedSourceHint =
-      sourceHint === "greenhouse" || sourceHint === "lever" || sourceHint === "ashby"
+      sourceHint === "greenhouse" ||
+        sourceHint === "lever" ||
+        sourceHint === "ashby" ||
+        sourceHint === "workable" ||
+        sourceHint === "smartrecruiters" ||
+        sourceHint === "recruitee"
         ? sourceHint
         : undefined;
     const tier = tierIndex >= 0 ? row[tierIndex]?.trim() : "";
@@ -295,10 +329,116 @@ function parseCandidateCsv(input: string) {
   return { companies };
 }
 
+function parseCandidateBoardCsv(input: string) {
+  const rows = parseCsvRows(input);
+  if (rows.length < 2) {
+    throw new Error("CSV must include a header row and at least one board row.");
+  }
+
+  const headers = rows[0].map(normalizeCsvHeader);
+  const columnIndex = (name: string) => headers.indexOf(normalizeCsvHeader(name));
+  const companyIndex = columnIndex("company");
+  const atsIndex = columnIndex("ats");
+  const sourceNameIndex = columnIndex("sourceName");
+  const boardUrlIndex = columnIndex("boardUrl");
+  const evidenceUrlIndex = columnIndex("evidenceUrl");
+  const careersUrlIndex = columnIndex("careersUrl");
+  const boardTokenIndex = columnIndex("boardToken");
+  const homepageIndex = columnIndex("homepage");
+  const companyDomainIndex = columnIndex("companyDomain");
+  const segmentsIndex = columnIndex("segments");
+  const originIndex = columnIndex("origin");
+  const notesIndex = columnIndex("notes");
+  const usEvidenceIndex = columnIndex("usEvidence");
+  const relevantJobCountIndex = columnIndex("relevantJobCountEstimate");
+  const sampleTitlesIndex = columnIndex("sampleRelevantJobTitles");
+  const tierIndex = columnIndex("tier");
+
+  if (companyIndex < 0 || boardTokenIndex < 0 || (atsIndex < 0 && sourceNameIndex < 0)) {
+    throw new Error("Board CSV must include company, ats/sourceName, and boardToken columns.");
+  }
+
+  const boards = rows.slice(1).flatMap((row): CandidateBoardImportInput[] => {
+    const company = row[companyIndex]?.trim();
+    const ats = (atsIndex >= 0 ? row[atsIndex] : row[sourceNameIndex])?.trim().toLowerCase();
+    const boardToken = row[boardTokenIndex]?.trim();
+    const boardUrl =
+      boardUrlIndex >= 0 && row[boardUrlIndex]?.trim()
+        ? row[boardUrlIndex].trim()
+        : evidenceUrlIndex >= 0 && row[evidenceUrlIndex]?.trim()
+          ? row[evidenceUrlIndex].trim()
+          : careersUrlIndex >= 0 && row[careersUrlIndex]?.trim()
+            ? row[careersUrlIndex].trim()
+            : "";
+
+    if (!company || !ats || !boardToken || !boardUrl) {
+      return [];
+    }
+
+    const segments =
+      segmentsIndex >= 0
+        ? row[segmentsIndex]
+            ?.split("|")
+            .map((segment) => segment.trim())
+            .filter(Boolean)
+        : undefined;
+    const notes = [
+      notesIndex >= 0 ? row[notesIndex]?.trim() : "",
+      usEvidenceIndex >= 0 && row[usEvidenceIndex]?.trim() ? `usEvidence=${row[usEvidenceIndex].trim()}` : "",
+      relevantJobCountIndex >= 0 && row[relevantJobCountIndex]?.trim()
+        ? `relevantJobCountEstimate=${row[relevantJobCountIndex].trim()}`
+        : "",
+      sampleTitlesIndex >= 0 && row[sampleTitlesIndex]?.trim()
+        ? `sampleRelevantJobTitles=${row[sampleTitlesIndex].trim()}`
+        : "",
+      tierIndex >= 0 && row[tierIndex]?.trim() ? `tier=${row[tierIndex].trim()}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
+    return [
+      {
+        company,
+        ats,
+        boardUrl,
+        boardToken,
+        ...(homepageIndex >= 0 && row[homepageIndex]?.trim() ? { homepage: row[homepageIndex].trim() } : {}),
+        ...(companyDomainIndex >= 0 && row[companyDomainIndex]?.trim()
+          ? { companyDomain: row[companyDomainIndex].trim().toLowerCase() }
+          : {}),
+        ...(segments && segments.length > 0 ? { segments } : {}),
+        ...(originIndex >= 0 && row[originIndex]?.trim()
+          ? { origin: row[originIndex].trim() }
+          : { origin: "manual:board-csv-import" }),
+        ...(notes ? { notes } : {}),
+      },
+    ];
+  });
+
+  if (!boards.length) {
+    throw new Error("CSV did not include any importable board rows.");
+  }
+
+  return { boards };
+}
+
 function parseCandidateImportPayload(input: string) {
   const trimmed = input.trim();
   if (!trimmed) {
     throw new Error("Paste JSON or CSV before importing.");
+  }
+
+  const rows = looksLikeCsv(trimmed) || trimmed.trimStart().toLowerCase().startsWith("company,")
+    ? parseCsvRows(trimmed)
+    : [];
+  const headers = rows[0]?.map(normalizeCsvHeader) ?? [];
+  const isBoardCsv =
+    headers.includes("company") &&
+    headers.includes("boardtoken") &&
+    (headers.includes("ats") || headers.includes("sourcename"));
+
+  if (isBoardCsv) {
+    return parseCandidateBoardCsv(trimmed);
   }
 
   if (looksLikeCandidateCsv(trimmed)) {
@@ -413,7 +553,8 @@ function CandidateCompaniesPanel() {
 
     try {
       setActionState({ kind: "import", pending: true, message: "Importing candidates..." });
-      const response = await fetch(`${apiBase()}/jobs/candidate-companies`, {
+      const isBoardImport = Boolean(body && typeof body === "object" && "boards" in body);
+      const response = await fetch(`${apiBase()}/jobs/${isBoardImport ? "candidate-boards/import" : "candidate-companies"}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -423,7 +564,7 @@ function CandidateCompaniesPanel() {
       setActionState({
         kind: "import",
         pending: false,
-        message: `Imported ${result.imported ?? "some"} candidates${result.skipped ? `, ${result.skipped} skipped` : ""}.`,
+        message: `Imported ${result.imported ?? "some"} ${isBoardImport ? "candidate boards" : "candidates"}${result.skipped ? `, ${result.skipped} skipped` : ""}.`,
       });
       setImportJson("");
       await loadCompanies(true);
@@ -682,14 +823,14 @@ function CandidateCompaniesPanel() {
           <div className="flex-1">
             <h2 className="text-ink text-sm font-semibold tracking-tight mb-1">Import Candidates</h2>
             <p className="text-sage text-xs leading-5 mb-3">
-              Paste JSON or CSV. Duplicates are handled by normalized company, homepage, and domain. Use either a{" "}
+              Paste JSON or CSV. Supports company rows or direct ATS board rows. Duplicates are handled by normalized company, homepage, domain, and board token. Use either a{" "}
               <code className="font-mono bg-parchment px-1 rounded">{"{ companies: [...] }"}</code>{" "}
-              object, a bare array, or CSV with company/homepage columns.
+              object, a bare array, or CSV with company/homepage or ats/boardToken columns.
             </p>
             <textarea
               value={importJson}
               onChange={(e) => setImportJson(e.target.value)}
-              placeholder={"company,homepage,companyDomain,careersUrl,sourceHint,segments,tier,origin,notes\nExample AI,https://example.ai,example.ai,,greenhouse,ai|software engineering,priority,manual:csv-import,AI infrastructure with US roles"}
+              placeholder={"company,homepage,companyDomain,careersUrl,sourceHint,segments,tier,origin,notes\nExample AI,https://example.ai,example.ai,,workable,ai|software engineering,priority,manual:csv-import,AI infrastructure with US roles\n\ncompany,ats,boardUrl,boardToken,segments,origin,notes\nExample AI,workable,https://apply.workable.com/example-ai/,example-ai,ai|software engineering,manual:board-csv-import,verified board with jobs"}
               rows={7}
               className="w-full rounded-xl border border-line bg-parchment/50 px-4 py-3 text-xs font-mono text-ink placeholder:text-sage/60 focus:outline-none focus:ring-1 focus:ring-accent/40 resize-y"
             />
@@ -943,6 +1084,7 @@ type BoardSourceResult = {
       skipped?: number;
       validated?: number;
       failed?: number;
+      searchBlocked?: boolean;
     }
   >;
 };
@@ -955,6 +1097,10 @@ function CandidateBoardsPanel() {
     limit: 25,
     focusAreas: DEFAULT_IT_FOCUS_AREAS,
     customQuery: "",
+  });
+  const [validationForm, setValidationForm] = useState({
+    limit: 25,
+    sourceName: "all",
   });
   const [boardSourceResult, setBoardSourceResult] = useState<BoardSourceResult | null>(null);
   const [actionState, setActionState] = useState<{
@@ -1030,16 +1176,40 @@ function CandidateBoardsPanel() {
 
   async function handleValidate() {
     try {
-      setActionState({ kind: "validate", pending: true, message: "Queuing validation..." });
+      setActionState({ kind: "validate", pending: true, message: "Validating candidate boards..." });
+      const body: Record<string, unknown> = {
+        limit: validationForm.limit,
+      };
+      if (validationForm.sourceName !== "all") {
+        body.sourceName = validationForm.sourceName;
+      }
+
       const response = await fetch(`${apiBase()}/jobs/candidate-boards/validate`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
       });
       if (!response.ok) throw new Error(`Request failed with ${response.status}`);
-      const result = (await response.json()) as { enqueued?: number; queued?: number; validated?: number };
+      const result = (await response.json()) as {
+        enqueued?: number;
+        queued?: number;
+        validated?: number;
+        rejected?: number;
+        deferred?: number;
+        skipped?: number;
+        processed?: number;
+      };
+      const processed = result.processed ?? result.enqueued ?? result.queued ?? result.validated ?? 0;
+      const details = [
+        `${result.validated ?? 0} validated`,
+        `${result.rejected ?? 0} rejected`,
+        `${result.deferred ?? 0} deferred`,
+        result.skipped ? `${result.skipped} skipped` : "",
+      ].filter(Boolean);
       setActionState({
         kind: "validate",
         pending: false,
-        message: `Validation queued for ${result.enqueued ?? result.queued ?? result.validated ?? 0} boards.`,
+        message: `Validation processed ${processed} boards: ${details.join(", ")}.`,
       });
       await loadBoards(true);
     } catch (err) {
@@ -1107,7 +1277,7 @@ function CandidateBoardsPanel() {
               <span className="rounded-full bg-[#1a2018] px-2.5 py-0.5 text-[10px] font-medium text-white">Preferred</span>
             </div>
             <p className="text-sage text-xs leading-5">
-              Discover public Greenhouse, Lever, and Ashby boards directly — boards land pre-validated in staging, ready to promote.
+              Discover public ATS boards directly — boards land pre-validated in staging, ready to promote.
             </p>
           </div>
         </div>
@@ -1206,6 +1376,9 @@ function CandidateBoardsPanel() {
                         <p>Skipped {stats.skipped ?? 0}</p>
                         <p>Validated {stats.validated ?? 0}</p>
                         <p>Failed {stats.failed ?? 0}</p>
+                        {stats.searchBlocked ? (
+                          <p className="font-medium text-red-700">Search blocked</p>
+                        ) : null}
                       </div>
                     </div>
                   ))}
@@ -1298,7 +1471,46 @@ function CandidateBoardsPanel() {
               validates and promotes matching boards automatically.
             </p>
           </div>
-          <div className="flex flex-wrap gap-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="block text-[10px] uppercase tracking-[0.12em] text-sage mb-1.5">
+                Batch
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={500}
+                value={validationForm.limit}
+                onChange={(event) =>
+                  setValidationForm((form) => ({
+                    ...form,
+                    limit: Math.min(500, Math.max(1, Number(event.target.value) || 1)),
+                  }))
+                }
+                className="w-24 rounded-full border border-line bg-parchment/50 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-1 focus:ring-accent/40"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-[0.12em] text-sage mb-1.5">
+                Source
+              </label>
+              <select
+                value={validationForm.sourceName}
+                onChange={(event) =>
+                  setValidationForm((form) => ({
+                    ...form,
+                    sourceName: event.target.value,
+                  }))
+                }
+                className="w-44 rounded-full border border-line bg-parchment/50 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-1 focus:ring-accent/40"
+              >
+                {BOARD_VALIDATION_SOURCES.map((source) => (
+                  <option key={source} value={source}>
+                    {source === "all" ? "All sources" : source}
+                  </option>
+                ))}
+              </select>
+            </div>
             <button
               type="button"
               onClick={() => void handleValidate()}

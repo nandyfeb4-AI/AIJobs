@@ -813,6 +813,24 @@ browser-rendering every careers page
 trying to beat LinkedIn/Indeed broadly on day one
 ```
 
+## ATS Rate-Limit Notes
+
+For second-wave ATS sources, treat validation and sync as source-specific workloads, not one generic high-concurrency queue.
+
+Observed during the April 28, 2026 Workable / SmartRecruiters / Recruitee research pass:
+
+- Workable returned `403` during high-concurrency verification and required low-concurrency retry.
+- Recruitee returned `429` during high-concurrency verification and required throttled retry.
+- SmartRecruiters looked comparatively smoother in that research pass, but should still use bounded concurrency.
+
+Operational implication:
+
+```text
+Workable and Recruitee need conservative concurrency, retry/backoff, and likely smaller validation batches before bulk sync.
+```
+
+Do not import a large Workable/Recruitee batch and immediately validate or sync hundreds of boards at unrestricted concurrency. Prefer source-level limits, exponential backoff, and run metrics that show validation attempts, rate-limit failures, successful boards, and jobs added.
+
 ## Final Recommendation
 
 For the next month, prioritize getting to:
@@ -830,4 +848,3 @@ Your short-term goal is not to discover the maximum number of boards. Your goal 
 Once that machine is measurable, improvements will compound. Once job quality is strong in one niche, GTM becomes much easier because your message becomes specific:
 
 > We find fresh direct-apply jobs that match you, then generate the tailored application packet for each one.
-

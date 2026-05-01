@@ -8,7 +8,14 @@ export type JobMatch = {
   applyMode?: ApplyMode;
 };
 
-export type ExternalJobSource = "greenhouse" | "lever" | "ashby" | "adzuna";
+export type ExternalJobSource =
+  | "greenhouse"
+  | "lever"
+  | "ashby"
+  | "workable"
+  | "smartrecruiters"
+  | "recruitee"
+  | "adzuna";
 
 export type SourceBoardConfig = {
   source: ExternalJobSource;

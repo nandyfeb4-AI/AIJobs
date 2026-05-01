@@ -10,6 +10,12 @@ const ATS_HOSTS = [
   "jobs.ashbyhq.com",
   "api.lever.co",
   "jobs.lever.co",
+  "apply.workable.com",
+  "www.workable.com",
+  "api.smartrecruiters.com",
+  "careers.smartrecruiters.com",
+  "jobs.smartrecruiters.com",
+  "recruitee.com",
 ];
 
 function normalizeDomain(hostname: string) {

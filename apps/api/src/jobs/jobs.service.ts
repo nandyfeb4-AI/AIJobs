@@ -10,12 +10,16 @@ import { compareJobsByPostedAt, interleaveBoardJobs, isTargetRole, isUsRelevantJ
 import { AshbyAdapter } from "./adapters/ashby.adapter";
 import { GreenhouseAdapter } from "./adapters/greenhouse.adapter";
 import { LeverAdapter } from "./adapters/lever.adapter";
+import { RecruiteeAdapter } from "./adapters/recruitee.adapter";
+import { SmartRecruitersAdapter } from "./adapters/smartrecruiters.adapter";
+import { WorkableAdapter } from "./adapters/workable.adapter";
 import { getStarterBoardCatalog, getStarterBoards, getStarterBoardSummary } from "./board-catalog";
 import { extractBoardsFromText } from "./board-discovery";
 import { getCandidateSeedCompanies, getCandidateSeedGroups } from "./candidate-company-catalog";
 import { formatBoardToken } from "./source-formatters";
 import { getTargetCompanies } from "./target-company-catalog";
 import type { AggregateJobsResult, SourceAdapter } from "./jobs.types";
+import { stripHtml } from "./jobs.utils";
 import { PrismaService } from "../prisma/prisma.service";
 
 type CandidateSourceTier = "top" | "priority" | "growth";
@@ -32,13 +36,86 @@ type SourceUrlEvidence = {
   url: string;
   evidenceSource: CandidateEvidenceSource;
 };
+type BoardFirstSource = Exclude<ExternalJobSource, "adzuna">;
+type WorkableXmlJob = {
+  title?: string | null;
+  date?: string | null;
+  referencenumber?: string | null;
+  url?: string | null;
+  company?: string | null;
+  city?: string | null;
+  state?: string | null;
+  country?: string | null;
+  remote?: string | null;
+  description?: string | null;
+};
 
-const BOARD_FIRST_SOURCES: Array<Exclude<ExternalJobSource, "adzuna">> = [
+type WorkableXmlIngestInput = {
+  limit?: number;
+  maxRecords?: number;
+  freshDays?: number;
+  dryRun?: boolean;
+};
+
+type WorkableXmlIngestStats = {
+  sourceName: "workable_xml";
+  feedUrl: string;
+  dryRun: boolean;
+  limit: number;
+  maxRecords: number;
+  freshDays: number;
+  seen: number;
+  parsed: number;
+  fresh: number;
+  usRelevant: number;
+  targetRole: number;
+  inserted: number;
+  updated: number;
+  persisted: number;
+  skippedOld: number;
+  skippedMissingRequired: number;
+  skippedNonUs: number;
+  skippedNonTarget: number;
+  skippedDuplicate: number;
+  skippedPersistError: number;
+  persistErrors: Array<{
+    sourceKey: string;
+    title: string;
+    company: string;
+    message: string;
+  }>;
+  stoppedReason: "limit_reached" | "max_records_reached" | "feed_complete";
+};
+
+type PersistedJobDedupeRow = {
+  sourceKey: string;
+  sourceId: string | null;
+  sourceName: string;
+  title: string;
+  company: string;
+  location: string | null;
+  applyUrl: string;
+};
+
+type PersistedJobDedupeIndex = {
+  bySourceKey: Map<string, PersistedJobDedupeRow>;
+  byApplyUrl: Map<string, PersistedJobDedupeRow>;
+  byWorkableId: Map<string, PersistedJobDedupeRow>;
+  byCompanyTitle: Map<string, PersistedJobDedupeRow[]>;
+};
+
+const BOARD_FIRST_SOURCES: BoardFirstSource[] = [
   "greenhouse",
   "lever",
   "ashby",
+  "workable",
+  "smartrecruiters",
+  "recruitee",
 ];
+const SUPPORTED_ATS_SOURCES = new Set<BoardFirstSource>(BOARD_FIRST_SOURCES);
 const BOARD_REJECTION_COOLDOWN_DAYS = 14;
+const WORKABLE_XML_FEED_URL = "https://www.workable.com/boards/workable.xml";
+const WORKABLE_XML_SOURCE_NAME = "workable_xml";
 
 const DEFAULT_CANDIDATE_FOCUS_AREAS = [
   "software engineering",
@@ -67,11 +144,17 @@ export class JobsService {
     @Inject(GreenhouseAdapter) greenhouseAdapter: GreenhouseAdapter,
     @Inject(LeverAdapter) leverAdapter: LeverAdapter,
     @Inject(AshbyAdapter) ashbyAdapter: AshbyAdapter,
+    @Inject(WorkableAdapter) workableAdapter: WorkableAdapter,
+    @Inject(SmartRecruitersAdapter) smartRecruitersAdapter: SmartRecruitersAdapter,
+    @Inject(RecruiteeAdapter) recruiteeAdapter: RecruiteeAdapter,
   ) {
     this.adapters = {
       greenhouse: greenhouseAdapter,
       lever: leverAdapter,
       ashby: ashbyAdapter,
+      workable: workableAdapter,
+      smartrecruiters: smartRecruitersAdapter,
+      recruitee: recruiteeAdapter,
       adzuna: {
         source: "adzuna",
         async fetchJobs(): Promise<AggregatedJob[]> {
@@ -159,7 +242,7 @@ export class JobsService {
                 "Prefer well-known companies first for tier=top, then strong category leaders for tier=priority, then broader growth companies for tier=growth.",
                 "Avoid duplicates, staffing firms, universities, government agencies, and companies with no clear corporate website.",
                 "Include careersUrl only when you found a likely careers page from web results; otherwise return null.",
-                "Use sourceHint only if the web evidence strongly suggests greenhouse, lever, or ashby; otherwise null.",
+                "Use sourceHint only if the web evidence strongly suggests greenhouse, lever, ashby, workable, smartrecruiters, or recruitee; otherwise null.",
               ].join(" "),
             },
           ],
@@ -219,9 +302,11 @@ export class JobsService {
         ? input.focusAreas
         : DEFAULT_CANDIDATE_FOCUS_AREAS;
 
-    const limitsBySource = this.distributeBoardSourceLimit(limit);
+    const selectedSources = this.resolveBoardFirstSources(input?.customQuery);
+    const limitsBySource = this.distributeBoardSourceLimit(limit, selectedSources);
     const discoveredBySource = await this.harvestDirectBoardCandidates({
       limit,
+      sources: selectedSources,
       limitsBySource,
       focusAreas,
       customQuery: input?.customQuery,
@@ -235,6 +320,7 @@ export class JobsService {
       for (let round = 1; round <= 2 && dedupedCandidates.length < limit; round += 1) {
         const backfillBySource = await this.harvestBackfillBoardCandidates({
           round,
+          sources: selectedSources,
           limitsBySource,
           focusAreas,
           customQuery: input?.customQuery,
@@ -278,49 +364,38 @@ export class JobsService {
       )
       .join("\n\n");
     const validationPool = this.interleaveCandidateBoardGroups(
-      BOARD_FIRST_SOURCES.map((source) =>
+      selectedSources.map((source) =>
         dedupedCandidates.filter((candidate) => candidate.source === source),
       ),
       Math.min(Math.max(limit * 6, limit), dedupedCandidates.length),
     );
     const validatedBoards = await this.validateBoardCandidates(validationPool, limit);
-    const createdBoardsBySource = validatedBoards.createdBoards.reduce<Record<
-      Exclude<ExternalJobSource, "adzuna">,
-      number
-    >>((acc, board) => {
+    const emptySourceCounts = () =>
+      Object.fromEntries(selectedSources.map((source) => [source, 0])) as Partial<Record<BoardFirstSource, number>>;
+    const createdBoardsBySource = validatedBoards.createdBoards.reduce<Partial<Record<BoardFirstSource, number>>>(
+      (acc, board) => {
         const sourceName =
           typeof (board as { sourceName?: unknown }).sourceName === "string"
-            ? ((board as { sourceName: Exclude<ExternalJobSource, "adzuna"> }).sourceName)
+            ? ((board as { sourceName: BoardFirstSource }).sourceName)
             : null;
-        if (sourceName) {
-          acc[sourceName] += 1;
+        if (sourceName && sourceName in acc) {
+          acc[sourceName] = (acc[sourceName] ?? 0) + 1;
         }
         return acc;
       },
-      {
-        greenhouse: 0,
-        lever: 0,
-        ashby: 0,
-      },
+      emptySourceCounts(),
     );
-    const failedBoardsBySource = validatedBoards.failedValidations.reduce<Record<
-      Exclude<ExternalJobSource, "adzuna">,
-      number
-    >>((acc, failure) => {
-        const sourceName =
-          failure.source === "greenhouse" || failure.source === "lever" || failure.source === "ashby"
-            ? failure.source
-            : null;
-        if (sourceName) {
-          acc[sourceName] += 1;
+    const failedBoardsBySource = validatedBoards.failedValidations.reduce<Partial<Record<BoardFirstSource, number>>>(
+      (acc, failure) => {
+        const sourceName = SUPPORTED_ATS_SOURCES.has(failure.source as BoardFirstSource)
+          ? (failure.source as BoardFirstSource)
+          : null;
+        if (sourceName && sourceName in acc) {
+          acc[sourceName] = (acc[sourceName] ?? 0) + 1;
         }
         return acc;
       },
-      {
-        greenhouse: 0,
-        lever: 0,
-        ashby: 0,
-      },
+      emptySourceCounts(),
     );
 
     return {
@@ -332,7 +407,8 @@ export class JobsService {
       skippedDuplicateBoards: skippedDuplicateBoards.slice(0, 10),
       failedValidationCount: validatedBoards.failedValidations.length,
       failedValidations: validatedBoards.failedValidations,
-      llmAssistanceEnabled: false,
+      llmAssistanceEnabled: this.openaiBoardFallbackEnabled && Boolean(this.openaiClient),
+      sources: selectedSources,
       companies: validatedBoards.createdCompanies,
       boards: validatedBoards.createdBoards,
       sourceBreakdown: Object.fromEntries(
@@ -343,15 +419,18 @@ export class JobsService {
             discovered: entry.candidates.length,
             deduped: dedupedCandidates.filter((candidate) => candidate.source === entry.source).length,
             skipped: skippedDuplicateBoards.filter((candidate) => candidate.source === entry.source).length,
-            validated: createdBoardsBySource[entry.source],
-            failed: failedBoardsBySource[entry.source],
+            validated: createdBoardsBySource[entry.source] ?? 0,
+            failed: failedBoardsBySource[entry.source] ?? 0,
             pagesFetched: entry.pagesFetched,
             queriesTried: entry.queriesTried,
+            searchBlocked: entry.searchBlocked,
           },
         ]),
       ),
       debug: {
         rawTextPreview: rawText.slice(0, 1200),
+        directSearchBlockedCount: discoveredBySource.filter((entry) => entry.searchBlocked).length,
+        llmAssistanceEnabled: this.openaiBoardFallbackEnabled && Boolean(this.openaiClient),
         failedValidationCount: validatedBoards.failedValidations.length,
         failedValidations: validatedBoards.failedValidations.slice(0, 10),
         skippedDuplicateBoards: skippedDuplicateBoards.slice(0, 10),
@@ -483,6 +562,176 @@ export class JobsService {
       skipped: skippedDuplicates.length,
       skippedDuplicates: skippedDuplicates.slice(0, 20),
       companies: results,
+    };
+  }
+
+  async upsertCandidateBoards(
+    boards: Array<{
+      company: string;
+      homepage?: string;
+      companyDomain?: string;
+      ats?: string;
+      sourceName?: string;
+      boardToken: string;
+      boardUrl?: string;
+      evidenceUrl?: string;
+      segments?: string[];
+      origin?: string;
+      notes?: string;
+    }>,
+  ) {
+    const imported = [];
+    const skipped = [];
+    const seen = new Set<string>();
+
+    for (const board of boards) {
+      const source = (board.sourceName ?? board.ats ?? "").trim().toLowerCase() as BoardFirstSource;
+      const boardToken = board.boardToken?.trim();
+
+      if (!SUPPORTED_ATS_SOURCES.has(source) || !boardToken) {
+        skipped.push({
+          company: board.company,
+          source,
+          boardToken,
+          reason: "invalid_source_or_board_token",
+        });
+        continue;
+      }
+
+      const normalized = this.normalizeBoardCandidate({
+        source,
+        boardToken,
+        evidenceUrl: board.boardUrl ?? board.evidenceUrl ?? this.canonicalBoardUrl(source, boardToken),
+        evidenceKind: "board_root_url",
+        evidenceSource: "direct_search",
+      });
+
+      if (!normalized) {
+        skipped.push({
+          company: board.company,
+          source,
+          boardToken,
+          reason: "invalid_board_url_or_token",
+        });
+        continue;
+      }
+
+      const key = `${normalized.source}:${normalized.boardToken.toLowerCase()}`;
+      if (seen.has(key)) {
+        skipped.push({
+          company: board.company,
+          source: normalized.source,
+          boardToken: normalized.boardToken,
+          reason: "duplicate_in_import_payload",
+        });
+        continue;
+      }
+      seen.add(key);
+
+      const [existingSourceBoard, existingCandidateBoard] = await Promise.all([
+        (this.prisma as any).sourceBoard.findUnique({
+          where: {
+            sourceName_boardToken: {
+              sourceName: normalized.source,
+              boardToken: normalized.boardToken,
+            },
+          },
+          select: { id: true },
+        }),
+        (this.prisma as any).candidateBoard.findFirst({
+          where: {
+            sourceName: normalized.source,
+            boardToken: normalized.boardToken,
+            status: {
+              in: ["discovered", "validating", "validated", "promoted"],
+            },
+          },
+          select: { id: true },
+        }),
+      ]);
+
+      if (existingSourceBoard) {
+        skipped.push({
+          company: board.company,
+          source: normalized.source,
+          boardToken: normalized.boardToken,
+          reason: "already_in_source_boards",
+        });
+        continue;
+      }
+
+      if (existingCandidateBoard) {
+        skipped.push({
+          company: board.company,
+          source: normalized.source,
+          boardToken: normalized.boardToken,
+          reason: "already_in_candidate_boards",
+        });
+        continue;
+      }
+
+      const candidateCompany = await this.findOrCreateCandidateCompanyFromBoard({
+        company: board.company,
+        homepage: board.homepage?.trim() || normalized.evidenceUrl,
+        companyDomain: board.companyDomain?.trim() || undefined,
+        source: normalized.source,
+        boardToken: normalized.boardToken,
+        evidenceUrl: normalized.evidenceUrl,
+      });
+
+      const candidateBoard = await (this.prisma as any).candidateBoard.upsert({
+        where: {
+          sourceName_boardToken_candidateCompanyId: {
+            sourceName: normalized.source,
+            boardToken: normalized.boardToken,
+            candidateCompanyId: candidateCompany.id,
+          },
+        },
+        create: {
+          candidateCompanyId: candidateCompany.id,
+          sourceName: normalized.source,
+          boardToken: normalized.boardToken,
+          evidenceUrl: normalized.evidenceUrl,
+          status: "discovered",
+        },
+        update: {
+          evidenceUrl: normalized.evidenceUrl,
+          status: "discovered",
+          validationError: null,
+        },
+      });
+
+      await (this.prisma as any).candidateCompany.update({
+        where: { id: candidateCompany.id },
+        data: {
+          status: "discovered",
+          sourceHint: normalized.source,
+          careersUrl: normalized.evidenceUrl,
+          segments: board.segments ?? candidateCompany.segments ?? [],
+          origin: board.origin ?? candidateCompany.origin ?? "manual:board-csv-import",
+          notes:
+            [board.notes, `boardImport=${normalized.source}/${normalized.boardToken}`]
+              .filter(Boolean)
+              .join(" | ") || candidateCompany.notes,
+          lastDiscoveredAt: new Date(),
+          lastDiscoveryError: null,
+        },
+      });
+
+      imported.push({
+        candidateCompanyId: candidateCompany.id,
+        candidateBoardId: candidateBoard.id,
+        company: candidateCompany.company,
+        sourceName: normalized.source,
+        boardToken: normalized.boardToken,
+      });
+    }
+
+    return {
+      imported: imported.length,
+      skipped: skipped.length,
+      skippedBoards: skipped.slice(0, 20),
+      boards: imported,
     };
   }
 
@@ -659,9 +908,7 @@ export class JobsService {
     }
 
     if (
-      candidate.sourceHint === "greenhouse" ||
-      candidate.sourceHint === "lever" ||
-      candidate.sourceHint === "ashby"
+      SUPPORTED_ATS_SOURCES.has(candidate.sourceHint as Exclude<ExternalJobSource, "adzuna">)
     ) {
       priority += 200;
     }
@@ -670,7 +917,10 @@ export class JobsService {
     if (
       careersUrl.includes("greenhouse.io") ||
       careersUrl.includes("lever.co") ||
-      careersUrl.includes("ashbyhq.com")
+      careersUrl.includes("ashbyhq.com") ||
+      careersUrl.includes("workable.com") ||
+      careersUrl.includes("smartrecruiters.com") ||
+      careersUrl.includes("recruitee.com")
     ) {
       priority += 160;
     } else if (careersUrl) {
@@ -689,22 +939,50 @@ export class JobsService {
     });
   }
 
-  async validateCandidateBoards() {
+  async validateCandidateBoards(input?: { limit?: number; sourceName?: string }) {
+    const limit = Math.min(Math.max(input?.limit ?? 25, 1), 500);
+    const requestedSource = input?.sourceName?.trim().toLowerCase() as BoardFirstSource | undefined;
+    const sourceName = requestedSource && SUPPORTED_ATS_SOURCES.has(requestedSource) ? requestedSource : undefined;
     const boards = await (this.prisma as any).candidateBoard.findMany({
       where: {
         status: "discovered",
+        ...(sourceName ? { sourceName } : {}),
       },
       include: {
         candidateCompany: true,
       },
-      orderBy: [{ createdAt: "asc" }],
+      orderBy: [{ updatedAt: "asc" }, { createdAt: "asc" }],
+      take: limit,
     });
 
     const results = [];
+    const rateLimitedSources = new Set<string>();
 
     for (const board of boards) {
       const source = board.sourceName as ExternalJobSource;
       const adapter = this.adapters[source];
+
+      if (!adapter) {
+        results.push({
+          id: board.id,
+          boardToken: board.boardToken,
+          sourceName: board.sourceName,
+          status: "skipped",
+          reason: "unsupported_source",
+        });
+        continue;
+      }
+
+      if (rateLimitedSources.has(source)) {
+        results.push({
+          id: board.id,
+          boardToken: board.boardToken,
+          sourceName: board.sourceName,
+          status: "deferred",
+          reason: "source_rate_limited_in_this_batch",
+        });
+        continue;
+      }
 
       await (this.prisma as any).candidateBoard.update({
         where: { id: board.id },
@@ -796,6 +1074,27 @@ export class JobsService {
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown validation error";
 
+        if (this.isCandidateBoardRateLimit(source, message)) {
+          rateLimitedSources.add(source);
+
+          await (this.prisma as any).candidateBoard.update({
+            where: { id: board.id },
+            data: {
+              status: "discovered",
+              validationError: `Deferred due to rate limit: ${message}`,
+            },
+          });
+
+          results.push({
+            id: board.id,
+            boardToken: board.boardToken,
+            sourceName: board.sourceName,
+            status: "deferred",
+            reason: "rate_limited",
+          });
+          continue;
+        }
+
         await (this.prisma as any).candidateBoard.update({
           where: { id: board.id },
           data: {
@@ -803,7 +1102,7 @@ export class JobsService {
             validationError: message,
             validatedAt: new Date(),
           },
-          });
+        });
 
         await this.updateCandidateCompanyStatusFromBoards(board.candidateCompanyId, message);
 
@@ -815,12 +1114,44 @@ export class JobsService {
           reason: message,
         });
       }
+
+      const delayMs = this.candidateBoardValidationDelayMs(source);
+      if (delayMs > 0) {
+        await this.sleep(delayMs);
+      }
     }
 
     return {
       processed: results.length,
+      limit,
+      sourceName: sourceName ?? null,
+      validated: results.filter((result) => result.status === "validated").length,
+      rejected: results.filter((result) => result.status === "rejected").length,
+      deferred: results.filter((result) => result.status === "deferred").length,
+      skipped: results.filter((result) => result.status === "skipped").length,
       results,
     };
+  }
+
+  private candidateBoardValidationDelayMs(source: ExternalJobSource) {
+    if (source === "workable" || source === "recruitee") return 1200;
+    if (source === "smartrecruiters") return 500;
+    return 0;
+  }
+
+  private isCandidateBoardRateLimit(source: ExternalJobSource, message: string) {
+    const normalized = message.toLowerCase();
+    if (source === "workable") {
+      return normalized.includes("403") || normalized.includes("429") || normalized.includes("rate");
+    }
+    if (source === "recruitee" || source === "smartrecruiters") {
+      return normalized.includes("429") || normalized.includes("rate");
+    }
+    return normalized.includes("429") || normalized.includes("rate limit");
+  }
+
+  private async sleep(ms: number) {
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private async updateCandidateCompanyStatusFromBoards(
@@ -1077,6 +1408,90 @@ export class JobsService {
     };
   }
 
+  async ingestWorkableXmlFeed(input?: WorkableXmlIngestInput) {
+    const limit = Math.min(Math.max(input?.limit ?? 1000, 1), 10000);
+    const maxRecords = Math.min(Math.max(input?.maxRecords ?? 50000, 100), 500000);
+    const freshDays = Math.min(Math.max(input?.freshDays ?? 30, 1), 365);
+    const dryRun = input?.dryRun ?? false;
+    const cutoff = new Date(Date.now() - freshDays * 24 * 60 * 60 * 1000);
+    const dedupeIndex = await this.buildPersistedJobDedupeIndex();
+    const stats: WorkableXmlIngestStats = {
+      sourceName: WORKABLE_XML_SOURCE_NAME,
+      feedUrl: WORKABLE_XML_FEED_URL,
+      dryRun,
+      limit,
+      maxRecords,
+      freshDays,
+      seen: 0,
+      parsed: 0,
+      fresh: 0,
+      usRelevant: 0,
+      targetRole: 0,
+      inserted: 0,
+      updated: 0,
+      persisted: 0,
+      skippedOld: 0,
+      skippedMissingRequired: 0,
+      skippedNonUs: 0,
+      skippedNonTarget: 0,
+      skippedDuplicate: 0,
+      skippedPersistError: 0,
+      persistErrors: [],
+      stoppedReason: "feed_complete",
+    };
+
+    const response = await fetch(WORKABLE_XML_FEED_URL, {
+      headers: {
+        Accept: "application/xml,text/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": "AIJobsBot/0.1 (+https://aijobs.local; workable xml ingestion)",
+      },
+    });
+
+    if (!response.ok || !response.body) {
+      throw new Error(`Workable XML feed request failed with ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let reachedFeedEnd = false;
+
+    try {
+      while (stats.seen < maxRecords && stats.persisted < limit) {
+        const { done, value } = await reader.read();
+        if (done) {
+          reachedFeedEnd = true;
+          buffer += decoder.decode();
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+
+        const shouldStop = await this.consumeWorkableXmlBuffer(buffer, stats, cutoff, limit, dryRun, dedupeIndex);
+        buffer = shouldStop.buffer;
+        if (shouldStop.done) {
+          stats.stoppedReason = "limit_reached";
+          break;
+        }
+      }
+
+      if (stats.seen >= maxRecords && stats.persisted < limit) {
+        stats.stoppedReason = "max_records_reached";
+      }
+
+      if (stats.stoppedReason === "feed_complete" && buffer.includes("</job>")) {
+        await this.consumeWorkableXmlBuffer(buffer, stats, cutoff, limit, dryRun, dedupeIndex);
+      }
+    } finally {
+      if (!reachedFeedEnd) {
+        reader.cancel().catch(() => undefined);
+      }
+      reader.releaseLock();
+    }
+
+    return stats;
+  }
+
   async getPersistedJobs(input?: { cursor?: string; limit?: number }) {
     const pageSize =
       typeof input?.limit === "number" && Number.isFinite(input.limit) && input.limit > 0
@@ -1230,6 +1645,7 @@ export class JobsService {
     const since7d = new Date(now.getTime() - 7 * dayMs);
     const since14d = new Date(now.getTime() - 14 * dayMs);
     const since30d = new Date(now.getTime() - 30 * dayMs);
+    const since60d = new Date(now.getTime() - 60 * dayMs);
 
     const [jobStatusCounts, activeJobs, activeBoards, recentJobs] = await Promise.all([
       this.prisma.job.groupBy({
@@ -1270,6 +1686,7 @@ export class JobsService {
           status: JobStatus.active,
         },
         select: {
+          sourceKey: true,
           sourceName: true,
           boardToken: true,
           title: true,
@@ -1293,11 +1710,29 @@ export class JobsService {
       synced7d: 0,
       synced14d: 0,
       synced30d: 0,
+      synced60d: 0,
       posted24h: 0,
       posted7d: 0,
       posted14d: 0,
       posted30d: 0,
+      posted60d: 0,
       unknownPostedAt: 0,
+    };
+    const postedAgeBuckets = {
+      "0-7 days": 0,
+      "8-14 days": 0,
+      "15-30 days": 0,
+      "31-60 days": 0,
+      "60+ days": 0,
+      "Unknown posted date": 0,
+    };
+    const syncAgeBuckets = {
+      "0-24 hours": 0,
+      "1-7 days": 0,
+      "8-14 days": 0,
+      "15-30 days": 0,
+      "31-60 days": 0,
+      "60+ days": 0,
     };
     const bySource = new Map<string, number>();
     const byCategory = new Map<string, number>();
@@ -1321,14 +1756,19 @@ export class JobsService {
       if (job.lastSyncedAt >= since7d) freshness.synced7d += 1;
       if (job.lastSyncedAt >= since14d) freshness.synced14d += 1;
       if (job.lastSyncedAt >= since30d) freshness.synced30d += 1;
+      if (job.lastSyncedAt >= since60d) freshness.synced60d += 1;
+      syncAgeBuckets[this.classifySyncAgeBucket(job.lastSyncedAt, now)] += 1;
 
       if (!job.postedAt) {
         freshness.unknownPostedAt += 1;
+        postedAgeBuckets["Unknown posted date"] += 1;
       } else {
         if (job.postedAt >= since24h) freshness.posted24h += 1;
         if (job.postedAt >= since7d) freshness.posted7d += 1;
         if (job.postedAt >= since14d) freshness.posted14d += 1;
         if (job.postedAt >= since30d) freshness.posted30d += 1;
+        if (job.postedAt >= since60d) freshness.posted60d += 1;
+        postedAgeBuckets[this.classifyPostedAgeBucket(job.postedAt, now)] += 1;
       }
     }
 
@@ -1391,12 +1831,15 @@ export class JobsService {
           bySource: this.countMapToRows(latestIncreaseBySource),
         },
         freshness,
+        postedAgeBuckets: this.orderedBucketRows(postedAgeBuckets),
+        syncAgeBuckets: this.orderedBucketRows(syncAgeBuckets),
         bySource: this.countMapToRows(bySource),
         byCategory: this.countMapToRows(byCategory),
         byWorkMode: this.countMapToRows(byWorkMode),
         byLocation: this.countMapToRows(byLocation),
         topCompanies: this.countMapToRows(byCompany).slice(0, 10),
         recent: recentJobs.map((job) => ({
+          sourceKey: job.sourceKey,
           sourceName: job.sourceName,
           boardToken: job.boardToken,
           title: job.title,
@@ -1493,8 +1936,23 @@ export class JobsService {
       boardToken,
     }));
 
+    const workable = splitCsv(this.configService.get<string>("WORKABLE_ACCOUNT_SUBDOMAINS")).map((boardToken) => ({
+      source: "workable" as const,
+      boardToken,
+    }));
+
+    const smartRecruiters = splitCsv(this.configService.get<string>("SMARTRECRUITERS_COMPANY_IDS")).map((boardToken) => ({
+      source: "smartrecruiters" as const,
+      boardToken,
+    }));
+
+    const recruitee = splitCsv(this.configService.get<string>("RECRUITEE_COMPANY_SUBDOMAINS")).map((boardToken) => ({
+      source: "recruitee" as const,
+      boardToken,
+    }));
+
     const seeded = getStarterBoards(filterSource);
-    const envBoards = [...greenhouse, ...lever, ...ashby];
+    const envBoards = [...greenhouse, ...lever, ...ashby, ...workable, ...smartRecruiters, ...recruitee];
     const all = [...seeded, ...envBoards]
       .filter((item) => (filterSource ? item.source === filterSource : true))
       .filter(
@@ -1548,6 +2006,442 @@ export class JobsService {
     });
 
     return { boardJobs, boardResults, errors, requestedSources };
+  }
+
+  private async consumeWorkableXmlBuffer(
+    inputBuffer: string,
+    stats: WorkableXmlIngestStats,
+    cutoff: Date,
+    limit: number,
+    dryRun: boolean,
+    dedupeIndex: PersistedJobDedupeIndex,
+  ) {
+    let buffer = inputBuffer;
+
+    while (stats.seen < stats.maxRecords && stats.persisted < limit) {
+      const startIndex = buffer.indexOf("<job>");
+      if (startIndex === -1) {
+        if (buffer.length > 2048) {
+          buffer = buffer.slice(-2048);
+        }
+        break;
+      }
+
+      const endIndex = buffer.indexOf("</job>", startIndex);
+      if (endIndex === -1) {
+        buffer = buffer.slice(startIndex);
+        break;
+      }
+
+      const block = buffer.slice(startIndex, endIndex + "</job>".length);
+      buffer = buffer.slice(endIndex + "</job>".length);
+      stats.seen += 1;
+
+      await this.processWorkableXmlJob(block, stats, cutoff, dryRun, dedupeIndex);
+    }
+
+    return {
+      buffer,
+      done: stats.persisted >= limit,
+    };
+  }
+
+  private async processWorkableXmlJob(
+    block: string,
+    stats: WorkableXmlIngestStats,
+    cutoff: Date,
+    dryRun: boolean,
+    dedupeIndex: PersistedJobDedupeIndex,
+  ) {
+    const xmlJob = this.parseWorkableXmlJob(block);
+    const referenceNumber = xmlJob.referencenumber?.trim();
+    const title = xmlJob.title?.trim();
+    const company = xmlJob.company?.trim();
+    const applyUrl = xmlJob.url?.trim();
+
+    if (!referenceNumber || !title || !company || !applyUrl) {
+      stats.skippedMissingRequired += 1;
+      return;
+    }
+
+    stats.parsed += 1;
+
+    const postedAt = this.toDate(xmlJob.date ?? null);
+    if (postedAt && postedAt < cutoff) {
+      stats.skippedOld += 1;
+      return;
+    }
+    stats.fresh += 1;
+
+    const location = this.workableXmlLocation(xmlJob);
+    const workMode = this.workableXmlRemoteType(xmlJob.remote);
+    const filterJob = {
+      title,
+      location,
+      workMode,
+    };
+
+    if (!isUsRelevantJob(filterJob)) {
+      stats.skippedNonUs += 1;
+      return;
+    }
+    stats.usRelevant += 1;
+
+    if (!isTargetRole(filterJob)) {
+      stats.skippedNonTarget += 1;
+      return;
+    }
+    stats.targetRole += 1;
+
+    const sourceKey = `${WORKABLE_XML_SOURCE_NAME}:${referenceNumber}`;
+    const duplicate = this.findDuplicatePersistedJob(dedupeIndex, {
+      sourceKey,
+      sourceId: referenceNumber,
+      title,
+      company,
+      location,
+      applyUrl,
+    });
+
+    if (duplicate) {
+      stats.skippedDuplicate += 1;
+      if (!dryRun) {
+        try {
+          await this.prisma.job.update({
+            where: {
+              sourceKey: duplicate.sourceKey,
+            },
+            data: {
+              lastSeenAt: new Date(),
+              lastSyncedAt: new Date(),
+              status: JobStatus.active,
+            },
+          });
+        } catch (error) {
+          this.recordWorkableXmlPersistError(stats, {
+            sourceKey,
+            title,
+            company,
+            error,
+          });
+        }
+      }
+      return;
+    }
+
+    if (dryRun) {
+      stats.persisted += 1;
+      return;
+    }
+
+    const description = stripHtml(xmlJob.description) ?? "";
+    const companyDomain = this.targetCompanyDomain(company);
+    let existing: { id: string } | null;
+    try {
+      existing = await this.prisma.job.findUnique({
+        where: {
+          sourceKey,
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      await this.prisma.job.upsert({
+        where: {
+          sourceKey,
+        },
+        create: {
+          sourceKey,
+          sourceId: referenceNumber,
+          sourceName: WORKABLE_XML_SOURCE_NAME,
+          boardToken: null,
+          title,
+          company,
+          companyDomain,
+          companyLogoUrl: this.logoUrlForDomain(companyDomain),
+          location,
+          employmentType: null,
+          remoteType: workMode,
+          description,
+          applyUrl,
+          postedAt,
+          sourceUpdatedAt: postedAt,
+          firstSeenAt: new Date(),
+          lastSeenAt: new Date(),
+          lastSyncedAt: new Date(),
+          contentHash: this.workableXmlContentHash({ title, company, location, workMode, description }),
+          status: JobStatus.active,
+        },
+        update: {
+          title,
+          company,
+          companyDomain,
+          companyLogoUrl: this.logoUrlForDomain(companyDomain),
+          location,
+          employmentType: null,
+          remoteType: workMode,
+          description,
+          applyUrl,
+          postedAt,
+          sourceUpdatedAt: postedAt,
+          lastSeenAt: new Date(),
+          lastSyncedAt: new Date(),
+          contentHash: this.workableXmlContentHash({ title, company, location, workMode, description }),
+          status: JobStatus.active,
+          syncCount: { increment: 1 },
+        },
+      });
+    } catch (error) {
+      this.recordWorkableXmlPersistError(stats, {
+        sourceKey,
+        title,
+        company,
+        error,
+      });
+      return;
+    }
+
+    if (existing) {
+      stats.updated += 1;
+    } else {
+      stats.inserted += 1;
+    }
+    stats.persisted += 1;
+    this.addPersistedJobToDedupeIndex(dedupeIndex, {
+      sourceKey,
+      sourceId: referenceNumber,
+      sourceName: WORKABLE_XML_SOURCE_NAME,
+      title,
+      company,
+      location,
+      applyUrl,
+    });
+  }
+
+  private recordWorkableXmlPersistError(
+    stats: WorkableXmlIngestStats,
+    input: {
+      sourceKey: string;
+      title: string;
+      company: string;
+      error: unknown;
+    },
+  ) {
+    stats.skippedPersistError += 1;
+    if (stats.persistErrors.length >= 10) {
+      return;
+    }
+
+    stats.persistErrors.push({
+      sourceKey: input.sourceKey,
+      title: input.title,
+      company: input.company,
+      message: input.error instanceof Error ? input.error.message : "Unknown persistence error",
+    });
+  }
+
+  private parseWorkableXmlJob(block: string): WorkableXmlJob {
+    return {
+      title: this.xmlField(block, "title"),
+      date: this.xmlField(block, "date"),
+      referencenumber: this.xmlField(block, "referencenumber"),
+      url: this.xmlField(block, "url"),
+      company: this.xmlField(block, "company"),
+      city: this.xmlField(block, "city"),
+      state: this.xmlField(block, "state"),
+      country: this.xmlField(block, "country"),
+      remote: this.xmlField(block, "remote"),
+      description: this.xmlField(block, "description"),
+    };
+  }
+
+  private xmlField(block: string, field: keyof WorkableXmlJob) {
+    const match = block.match(new RegExp(`<${field}>([\\s\\S]*?)<\\/${field}>`, "i"));
+    return match ? this.decodeXmlValue(match[1]) : null;
+  }
+
+  private decodeXmlValue(value: string) {
+    const trimmed = value.trim();
+    const cdata = trimmed.match(/^<!\[CDATA\[([\s\S]*?)\]\]>$/);
+    return (cdata ? cdata[1] : trimmed)
+      .replace(/^<!\[CDATA\[/, "")
+      .replace(/\]\]>$/, "")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&quot;/gi, "\"")
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  private workableXmlLocation(job: WorkableXmlJob) {
+    const country = this.normalizeWorkableXmlCountry(job.country);
+    return [job.city, job.state, country].map((part) => part?.trim()).filter(Boolean).join(", ");
+  }
+
+  private normalizeWorkableXmlCountry(country?: string | null) {
+    const normalized = country?.trim();
+    if (!normalized) return null;
+    if (/^(us|usa|u\.s\.|u\.s\.a\.)$/i.test(normalized)) {
+      return "United States";
+    }
+    if (/^(uk|gb|gbr)$/i.test(normalized)) {
+      return "United Kingdom";
+    }
+    return normalized;
+  }
+
+  private workableXmlRemoteType(remote?: string | null) {
+    const normalized = remote?.trim().toLowerCase();
+    if (!normalized) return null;
+    return ["true", "1", "yes", "remote"].includes(normalized) ? "remote" : null;
+  }
+
+  private workableXmlContentHash(job: {
+    title: string;
+    company: string;
+    location: string;
+    workMode: string | null;
+    description: string;
+  }) {
+    return [job.title, job.company, job.location, job.workMode, job.description]
+      .filter(Boolean)
+      .join("|");
+  }
+
+  private async buildPersistedJobDedupeIndex(): Promise<PersistedJobDedupeIndex> {
+    const rows = await this.prisma.job.findMany({
+      where: {
+        status: JobStatus.active,
+      },
+      select: {
+        sourceKey: true,
+        sourceId: true,
+        sourceName: true,
+        title: true,
+        company: true,
+        location: true,
+        applyUrl: true,
+      },
+    });
+
+    const index: PersistedJobDedupeIndex = {
+      bySourceKey: new Map(),
+      byApplyUrl: new Map(),
+      byWorkableId: new Map(),
+      byCompanyTitle: new Map(),
+    };
+
+    for (const row of rows) {
+      this.addPersistedJobToDedupeIndex(index, row);
+    }
+
+    return index;
+  }
+
+  private addPersistedJobToDedupeIndex(
+    index: PersistedJobDedupeIndex,
+    row: PersistedJobDedupeRow,
+  ) {
+    index.bySourceKey.set(row.sourceKey, row);
+
+    const applyUrl = this.normalizeUrl(row.applyUrl);
+    if (applyUrl) {
+      index.byApplyUrl.set(applyUrl, row);
+    }
+
+    const workableId = this.workableJobIdFromPersistedJob(row);
+    if (workableId) {
+      index.byWorkableId.set(workableId, row);
+    }
+
+    const companyTitleKey = this.companyTitleDedupeKey(row.company, row.title);
+    const companyTitleRows = index.byCompanyTitle.get(companyTitleKey) ?? [];
+    companyTitleRows.push(row);
+    index.byCompanyTitle.set(companyTitleKey, companyTitleRows);
+  }
+
+  private findDuplicatePersistedJob(index: PersistedJobDedupeIndex, input: {
+    sourceKey: string;
+    sourceId: string;
+    title: string;
+    company: string;
+    location: string;
+    applyUrl: string;
+  }) {
+    const exactSourceKey = index.bySourceKey.get(input.sourceKey);
+    if (exactSourceKey) return exactSourceKey;
+
+    const exactApplyUrl = index.byApplyUrl.get(this.normalizeUrl(input.applyUrl));
+    if (exactApplyUrl) return exactApplyUrl;
+
+    const sameWorkableId = index.byWorkableId.get(input.sourceId);
+    if (sameWorkableId) return sameWorkableId;
+
+    const candidates = index.byCompanyTitle.get(this.companyTitleDedupeKey(input.company, input.title)) ?? [];
+    return candidates.find((candidate) =>
+      this.locationsCompatibleForDedupe(candidate.location, input.location),
+    ) ?? null;
+  }
+
+  private companyTitleDedupeKey(company: string, title: string) {
+    return `${this.normalizeJobDedupeText(company)}:${this.normalizeJobDedupeText(title)}`;
+  }
+
+  private workableJobIdFromPersistedJob(row: PersistedJobDedupeRow) {
+    if (![WORKABLE_XML_SOURCE_NAME, "workable"].includes(row.sourceName)) {
+      return null;
+    }
+
+    if (row.sourceId) {
+      return row.sourceId;
+    }
+
+    const sourceKeyParts = row.sourceKey.split(":");
+    return sourceKeyParts.length >= 3 ? sourceKeyParts[sourceKeyParts.length - 1] : null;
+  }
+
+  private normalizeJobDedupeText(value?: string | null) {
+    return (value ?? "")
+      .toLowerCase()
+      .replace(/&/g, " and ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\b(inc|llc|ltd|corp|corporation|company|co)\b/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  private locationsCompatibleForDedupe(left?: string | null, right?: string | null) {
+    const leftSignal = this.locationDedupeSignal(left);
+    const rightSignal = this.locationDedupeSignal(right);
+
+    if (!leftSignal || !rightSignal) return true;
+    if (leftSignal === rightSignal) return true;
+    if (leftSignal === "remote-us" && rightSignal === "us") return true;
+    if (leftSignal === "us" && rightSignal === "remote-us") return true;
+
+    return false;
+  }
+
+  private locationDedupeSignal(value?: string | null) {
+    const normalized = (value ?? "").toLowerCase();
+    if (!normalized.trim()) return null;
+    const isRemote = /\bremote\b/.test(normalized);
+    const isUs =
+      /\bunited states\b|\busa\b|\bu\.s\.\b|\bus\b/.test(normalized) ||
+      /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia)\b/.test(normalized);
+
+    if (isRemote && isUs) return "remote-us";
+    if (isUs) return "us";
+    if (isRemote) return "remote";
+
+    return normalized
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   private toDate(value: string | null) {
@@ -1792,7 +2686,7 @@ Return strict JSON:
 {
   "careersUrl": string | null,
   "companyDomain": string | null,
-  "sourceHint": "greenhouse" | "lever" | "ashby" | null,
+  "sourceHint": "greenhouse" | "lever" | "ashby" | "workable" | "smartrecruiters" | "recruitee" | null,
   "segments": string[],
   "confidence": number | null,
   "notes": string | null
@@ -1837,12 +2731,27 @@ Return strict JSON:
         'Search for direct Ashby board roots using evidence like site:jobs.ashbyhq.com.',
         "Be conservative with Ashby: only include URLs that appear directly in search source URLs, not guessed slugs.",
       ],
+      workable: [
+        "Search for direct Workable hosted careers pages using evidence like site:apply.workable.com.",
+        "Prefer apply.workable.com/<company> board roots and avoid guessed company slugs.",
+      ],
+      smartrecruiters: [
+        "Search for direct SmartRecruiters career pages using evidence like site:careers.smartrecruiters.com or site:jobs.smartrecruiters.com.",
+        "Use the company identifier visible in the SmartRecruiters URL.",
+      ],
+      recruitee: [
+        "Search for direct Recruitee career pages using evidence like site:recruitee.com/o/ or company.recruitee.com.",
+        "Use the company subdomain from <company>.recruitee.com.",
+      ],
     };
 
     const sourcePatterns: Record<Exclude<ExternalJobSource, "adzuna">, string> = {
       greenhouse: "https://boards.greenhouse.io/<token> or https://job-boards.greenhouse.io/<token>",
       lever: "https://jobs.lever.co/<token>",
       ashby: "https://jobs.ashbyhq.com/<token>",
+      workable: "https://apply.workable.com/<token>",
+      smartrecruiters: "https://careers.smartrecruiters.com/<token>",
+      recruitee: "https://<token>.recruitee.com",
     };
 
     return [
@@ -1945,20 +2854,63 @@ Return strict JSON:
     }
   }
 
-  private distributeBoardSourceLimit(limit: number) {
-    const perSource = Math.floor(limit / BOARD_FIRST_SOURCES.length);
-    let remainder = limit % BOARD_FIRST_SOURCES.length;
+  private resolveBoardFirstSources(customQuery?: string): BoardFirstSource[] {
+    const text = customQuery?.toLowerCase() ?? "";
+    if (!text.trim()) {
+      return [...BOARD_FIRST_SOURCES];
+    }
 
-    return BOARD_FIRST_SOURCES.reduce(
+    const aliases: Record<BoardFirstSource, string[]> = {
+      greenhouse: ["greenhouse", "boards.greenhouse.io", "job-boards.greenhouse.io"],
+      lever: ["lever", "jobs.lever.co"],
+      ashby: ["ashby", "ashbyhq", "jobs.ashbyhq.com"],
+      workable: ["workable", "apply.workable.com"],
+      smartrecruiters: ["smartrecruiters", "smart recruiters", "careers.smartrecruiters.com", "jobs.smartrecruiters.com"],
+      recruitee: ["recruitee"],
+    };
+
+    const explicitIncludes = BOARD_FIRST_SOURCES.filter((source) =>
+      aliases[source].some((alias) => text.includes(alias)),
+    );
+    let selected = explicitIncludes.length ? explicitIncludes : [...BOARD_FIRST_SOURCES];
+    const exclusionClauses = text.match(/(?:exclude|excluding|without|skip|omit)[^.;&\n]+/g) ?? [];
+
+    selected = selected.filter((source) => {
+      const denied = aliases[source].some((alias) => {
+        const compactAlias = alias.replace(/\s+/g, "");
+        return (
+          exclusionClauses.some((clause) => clause.includes(alias) || clause.includes(compactAlias)) ||
+          text.includes(`not ${alias}`)
+        );
+      });
+
+      return !denied;
+    });
+
+    return selected.length ? selected : [...BOARD_FIRST_SOURCES];
+  }
+
+  private distributeBoardSourceLimit(limit: number, sources: BoardFirstSource[] = BOARD_FIRST_SOURCES) {
+    const selectedSources = sources.length ? sources : BOARD_FIRST_SOURCES;
+    const perSource = Math.floor(limit / selectedSources.length);
+    let remainder = limit % selectedSources.length;
+
+    const limits = BOARD_FIRST_SOURCES.reduce(
       (acc, source) => {
-        acc[source] = perSource + (remainder > 0 ? 1 : 0);
-        if (remainder > 0) {
-          remainder -= 1;
-        }
+        acc[source] = 0;
         return acc;
       },
-      {} as Record<Exclude<ExternalJobSource, "adzuna">, number>,
+      {} as Record<BoardFirstSource, number>,
     );
+
+    for (const source of selectedSources) {
+      limits[source] = perSource + (remainder > 0 ? 1 : 0);
+      if (remainder > 0) {
+        remainder -= 1;
+      }
+    }
+
+    return limits;
   }
 
   private buildBoardSearchQueries(input: {
@@ -1970,6 +2922,9 @@ Return strict JSON:
       greenhouse: ["boards.greenhouse.io", "job-boards.greenhouse.io"],
       lever: ["jobs.lever.co"],
       ashby: ["jobs.ashbyhq.com"],
+      workable: ["apply.workable.com"],
+      smartrecruiters: ["careers.smartrecruiters.com", "jobs.smartrecruiters.com"],
+      recruitee: ["recruitee.com"],
     };
 
     const focusTermsByArea: Record<string, string[]> = {
@@ -2119,14 +3074,15 @@ Return strict JSON:
 
   private async harvestDirectBoardCandidates(input: {
     limit: number;
-    limitsBySource: Record<Exclude<ExternalJobSource, "adzuna">, number>;
+    sources: BoardFirstSource[];
+    limitsBySource: Record<BoardFirstSource, number>;
     focusAreas: string[];
     customQuery?: string;
   }) {
     const maxPagesPerQuery = 5;
 
     return Promise.all(
-      BOARD_FIRST_SOURCES.map(async (source) => {
+      input.sources.map(async (source) => {
         const requested = input.limitsBySource[source];
         const targetCandidates = Math.min(Math.max(requested * 8, 20), 240);
         const queries = this.buildBoardSearchQueries({
@@ -2249,6 +3205,7 @@ Return strict JSON:
           candidates,
           queriesTried,
           pagesFetched,
+          searchBlocked: directSearchBlocked,
         };
       }),
     );
@@ -2256,14 +3213,15 @@ Return strict JSON:
 
   private async harvestBackfillBoardCandidates(input: {
     round: number;
-    limitsBySource: Record<Exclude<ExternalJobSource, "adzuna">, number>;
+    sources: BoardFirstSource[];
+    limitsBySource: Record<BoardFirstSource, number>;
     focusAreas: string[];
     customQuery?: string;
     knownCandidates: CandidateBoardInput[];
     keptCandidates: CandidateBoardInput[];
   }) {
     return Promise.all(
-      BOARD_FIRST_SOURCES.map(async (source) => {
+      input.sources.map(async (source) => {
         const requested = input.limitsBySource[source];
         const keptForSource = input.keptCandidates.filter((candidate) => candidate.source === source).length;
         const needed = Math.max(requested - keptForSource, 0);
@@ -2414,6 +3372,18 @@ Return strict JSON:
         `Find current Ashby job posting URLs on jobs.ashbyhq.com with United States or Remote US jobs in software, data, product, QA, cloud, security, and IT roles.`,
         `Find jobs.ashbyhq.com company boards for AI, SaaS, fintech, devtools, healthcare technology, security, data, and infrastructure companies hiring in the US. Do not guess a board URL from a company name.`,
       ],
+      workable: [
+        `Find real Workable hosted career pages on apply.workable.com for US companies hiring in ${roleFamilies}.`,
+        `Find Workable job pages or company boards for SaaS, AI, fintech, healthcare technology, security, data, and infrastructure companies with US jobs.`,
+      ],
+      smartrecruiters: [
+        `Find real SmartRecruiters company career pages on careers.smartrecruiters.com for US companies hiring in ${roleFamilies}.`,
+        `Find jobs.smartrecruiters.com posting URLs for software, data, product, QA, cloud, security, and IT roles in the US.`,
+      ],
+      recruitee: [
+        `Find real Recruitee career sites on <company>.recruitee.com for US companies hiring in ${roleFamilies}.`,
+        `Find Recruitee /o/ job posting URLs for software, data, product, QA, cloud, security, and IT roles in the US.`,
+      ],
     };
     const sampledDirectQueries = this.sampleSearchQueries(input.directQueries, 8);
     const customQuery = input.customQuery?.trim()
@@ -2448,6 +3418,18 @@ Return strict JSON:
       ashby: [
         `Backfill more real Ashby job board or posting URLs on jobs.ashbyhq.com for US technology companies hiring in ${roleFamilies}. ${avoidClause}`,
         `Find additional jobs.ashbyhq.com company boards or posting URLs for software, data, product, QA, cloud, security, and IT roles in the US. ${avoidClause}`,
+      ],
+      workable: [
+        `Backfill more real Workable career pages on apply.workable.com for US technology companies hiring in ${roleFamilies}. ${avoidClause}`,
+        `Find additional Workable job or company URLs for software, data, product, QA, cloud, security, and IT roles in the US. ${avoidClause}`,
+      ],
+      smartrecruiters: [
+        `Backfill more real SmartRecruiters career pages on careers.smartrecruiters.com for US technology companies hiring in ${roleFamilies}. ${avoidClause}`,
+        `Find additional jobs.smartrecruiters.com posting URLs for software, data, product, QA, cloud, security, and IT roles in the US. ${avoidClause}`,
+      ],
+      recruitee: [
+        `Backfill more real Recruitee career sites on company.recruitee.com for US technology companies hiring in ${roleFamilies}. ${avoidClause}`,
+        `Find additional Recruitee /o/ posting URLs for software, data, product, QA, cloud, security, and IT roles in the US. ${avoidClause}`,
       ],
     };
     const customQuery = input.customQuery?.trim()
@@ -2710,7 +3692,9 @@ Return strict JSON:
       if (
         (source === "greenhouse" && hostname === "boards-api.greenhouse.io") ||
         (source === "lever" && hostname === "api.lever.co") ||
-        (source === "ashby" && hostname === "api.ashbyhq.com")
+        (source === "ashby" && hostname === "api.ashbyhq.com") ||
+        (source === "workable" && hostname === "www.workable.com") ||
+        (source === "smartrecruiters" && hostname === "api.smartrecruiters.com")
       ) {
         return "api_url";
       }
@@ -2733,6 +3717,23 @@ Return strict JSON:
 
       if (source === "ashby" && hostname === "jobs.ashbyhq.com") {
         return segments.length > 1 ? "job_posting_url" : "board_root_url";
+      }
+
+      if (source === "workable" && hostname === "apply.workable.com") {
+        return segments.length > 2 || segments[0] === "j" ? "job_posting_url" : "board_root_url";
+      }
+
+      if (source === "smartrecruiters") {
+        if (hostname === "jobs.smartrecruiters.com") {
+          return segments.length > 1 ? "job_posting_url" : "board_root_url";
+        }
+        if (hostname === "careers.smartrecruiters.com") {
+          return "board_root_url";
+        }
+      }
+
+      if (source === "recruitee" && hostname.endsWith(".recruitee.com")) {
+        return segments[0] === "o" && segments.length > 1 ? "job_posting_url" : "board_root_url";
       }
     } catch {
       return "unknown";
@@ -2949,6 +3950,9 @@ Return strict JSON:
       greenhouse: `https://job-boards.greenhouse.io/${boardToken}`,
       lever: `https://jobs.lever.co/${boardToken}`,
       ashby: `https://jobs.ashbyhq.com/${boardToken}`,
+      workable: `https://apply.workable.com/${boardToken}`,
+      smartrecruiters: `https://careers.smartrecruiters.com/${boardToken}`,
+      recruitee: `https://${boardToken}.recruitee.com`,
     };
 
     try {
@@ -2960,9 +3964,15 @@ Return strict JSON:
           (source === "greenhouse" &&
             (hostname === "job-boards.greenhouse.io" || hostname === "boards.greenhouse.io")) ||
           (source === "lever" && hostname === "jobs.lever.co") ||
-          (source === "ashby" && hostname === "jobs.ashbyhq.com")
+          (source === "ashby" && hostname === "jobs.ashbyhq.com") ||
+          (source === "workable" && hostname === "apply.workable.com") ||
+          (source === "smartrecruiters" &&
+            (hostname === "careers.smartrecruiters.com" || hostname === "jobs.smartrecruiters.com")) ||
+          (source === "recruitee" && hostname.endsWith(".recruitee.com"))
         ) {
-          return `${parsed.protocol}//${parsed.hostname}/${boardToken}`;
+          return source === "recruitee"
+            ? `https://${boardToken}.recruitee.com`
+            : `${parsed.protocol}//${parsed.hostname}/${boardToken}`;
         }
       }
     } catch {
@@ -3290,6 +4300,12 @@ Return strict JSON:
       "job-boards.greenhouse.io",
       "jobs.lever.co",
       "jobs.ashbyhq.com",
+      "apply.workable.com",
+      "www.workable.com",
+      "careers.smartrecruiters.com",
+      "jobs.smartrecruiters.com",
+      "api.smartrecruiters.com",
+      "recruitee.com",
       "boards-api.greenhouse.io",
       "api.lever.co",
       "api.ashbyhq.com",
@@ -3398,10 +4414,43 @@ Return strict JSON:
     map.set(normalized, (map.get(normalized) ?? 0) + 1);
   }
 
+  private orderedBucketRows<TBucket extends string>(buckets: Record<TBucket, number>) {
+    return Object.entries(buckets).map(([label, count]) => ({
+      label,
+      count: count as number,
+    }));
+  }
+
   private countMapToRows(map: Map<string, number>) {
     return Array.from(map.entries())
       .map(([label, count]) => ({ label, count }))
       .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+  }
+
+  private classifyPostedAgeBucket(postedAt: Date, now: Date) {
+    const ageDays = this.ageInDays(postedAt, now);
+
+    if (ageDays <= 7) return "0-7 days" as const;
+    if (ageDays <= 14) return "8-14 days" as const;
+    if (ageDays <= 30) return "15-30 days" as const;
+    if (ageDays <= 60) return "31-60 days" as const;
+    return "60+ days" as const;
+  }
+
+  private classifySyncAgeBucket(syncedAt: Date, now: Date) {
+    const ageDays = this.ageInDays(syncedAt, now);
+
+    if (ageDays < 1) return "0-24 hours" as const;
+    if (ageDays <= 7) return "1-7 days" as const;
+    if (ageDays <= 14) return "8-14 days" as const;
+    if (ageDays <= 30) return "15-30 days" as const;
+    if (ageDays <= 60) return "31-60 days" as const;
+    return "60+ days" as const;
+  }
+
+  private ageInDays(value: Date, now: Date) {
+    const dayMs = 24 * 60 * 60 * 1000;
+    return Math.max(0, (now.getTime() - value.getTime()) / dayMs);
   }
 
   private classifyJobCategory(title: string) {
