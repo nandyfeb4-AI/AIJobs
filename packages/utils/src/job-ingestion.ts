@@ -240,9 +240,57 @@ const US_STATE_NAME_PATTERNS = [
 ];
 
 const US_STATE_ABBREVIATIONS = [
-  "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA",
-  "ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK",
-  "OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC",
+  "AL",
+  "AK",
+  "AZ",
+  "AR",
+  "CA",
+  "CO",
+  "CT",
+  "DE",
+  "FL",
+  "GA",
+  "HI",
+  "ID",
+  "IL",
+  "IN",
+  "IA",
+  "KS",
+  "KY",
+  "LA",
+  "ME",
+  "MD",
+  "MA",
+  "MI",
+  "MN",
+  "MS",
+  "MO",
+  "MT",
+  "NE",
+  "NV",
+  "NH",
+  "NJ",
+  "NM",
+  "NY",
+  "NC",
+  "ND",
+  "OH",
+  "OK",
+  "OR",
+  "PA",
+  "RI",
+  "SC",
+  "SD",
+  "TN",
+  "TX",
+  "UT",
+  "VT",
+  "VA",
+  "WA",
+  "WV",
+  "WI",
+  "WY",
+  "DC",
 ];
 
 const NON_US_LOCATION_PATTERNS = [
@@ -312,7 +360,9 @@ const NON_US_COUNTRY_CODES = new Set([
 ]);
 
 export function isTargetRole(job: JobLike) {
-  const searchable = [job.title, job.department, job.team].filter(Boolean).join(" ");
+  const searchable = [job.title, job.department, job.team]
+    .filter(Boolean)
+    .join(" ");
 
   if (!searchable.trim()) return false;
   if (EXCLUDED_TITLE_PATTERNS.some((pattern) => pattern.test(searchable))) {
@@ -323,10 +373,21 @@ export function isTargetRole(job: JobLike) {
 }
 
 export function isUsRelevantJob(job: JobLike) {
-  const searchable = [job.title, job.location, job.workMode].filter(Boolean).join(" ").trim();
+  const searchable = [job.title, job.location, job.workMode]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const locationSearchable = [job.location, job.workMode]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
 
   if (!searchable) {
     return false;
+  }
+
+  if (hasUsLocationSignal(locationSearchable)) {
+    return true;
   }
 
   if (hasExplicitNonUsCountryCode(job.location)) {
@@ -337,20 +398,24 @@ export function isUsRelevantJob(job: JobLike) {
     return false;
   }
 
-  if (US_LOCATION_PATTERNS.some((pattern) => pattern.test(searchable))) {
-    return true;
-  }
-
-  if (US_STATE_NAME_PATTERNS.some((pattern) => pattern.test(searchable))) {
-    return true;
-  }
-
   const abbreviationPattern = new RegExp(
     `(?:^|,\\s*)(?:${US_STATE_ABBREVIATIONS.join("|")})(?=\\s*,|\\s*$)`,
     "i",
   );
 
   return abbreviationPattern.test(job.location ?? "");
+}
+
+function hasUsLocationSignal(searchable: string) {
+  if (!searchable.trim()) {
+    return false;
+  }
+
+  if (US_LOCATION_PATTERNS.some((pattern) => pattern.test(searchable))) {
+    return true;
+  }
+
+  return US_STATE_NAME_PATTERNS.some((pattern) => pattern.test(searchable));
 }
 
 function hasExplicitNonUsCountryCode(location?: string | null) {
@@ -366,7 +431,13 @@ function hasExplicitNonUsCountryCode(location?: string | null) {
     .filter((token) => !["remote", "hybrid", "onsite"].includes(token));
 
   const lastToken = tokens[tokens.length - 1];
-  if (!lastToken || lastToken === "us" || lastToken === "usa" || lastToken === "u.s." || lastToken === "united states") {
+  if (
+    !lastToken ||
+    lastToken === "us" ||
+    lastToken === "usa" ||
+    lastToken === "u.s." ||
+    lastToken === "united states"
+  ) {
     return false;
   }
 

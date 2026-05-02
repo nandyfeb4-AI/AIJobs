@@ -25,7 +25,10 @@ type SmartRecruitersPosting = {
   postingUrl?: string | null;
   applyUrl?: string | null;
   jobAd?: {
-    sections?: Record<string, { title?: string | null; text?: string | null } | undefined>;
+    sections?: Record<
+      string,
+      { title?: string | null; text?: string | null } | undefined
+    >;
   } | null;
 };
 
@@ -36,9 +39,13 @@ type SmartRecruitersResponse = {
 
 function locationLabel(location?: SmartRecruitersPosting["location"]) {
   if (!location) return null;
-  const parts = [location.city, location.region, location.country].filter(Boolean);
+  const parts = [location.city, location.region, location.country].filter(
+    Boolean,
+  );
   const label = parts.join(", ");
-  return location.remote ? [label, "Remote"].filter(Boolean).join(" · ") : label || null;
+  return location.remote
+    ? [label, "Remote"].filter(Boolean).join(" · ")
+    : label || null;
 }
 
 function descriptionFromPosting(posting: SmartRecruitersPosting) {
@@ -62,13 +69,20 @@ export class SmartRecruitersAdapter implements SourceAdapter {
     const limit = 100;
 
     for (let offset = 0; offset < 500; offset += limit) {
+      const query = new URLSearchParams({
+        country: "us",
+        limit: String(limit),
+        offset: String(offset),
+      });
       const response = await fetch(
-        `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(boardToken)}/postings?limit=${limit}&offset=${offset}`,
+        `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(boardToken)}/postings?${query.toString()}`,
         { redirect: "follow" },
       );
 
       if (!response.ok) {
-        throw new Error(`SmartRecruiters request failed with ${response.status}`);
+        throw new Error(
+          `SmartRecruiters request failed with ${response.status}`,
+        );
       }
 
       const payload = (await response.json()) as SmartRecruitersResponse;
@@ -87,7 +101,9 @@ export class SmartRecruitersAdapter implements SourceAdapter {
             `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(boardToken)}/postings/${encodeURIComponent(job.id)}`,
             { redirect: "follow" },
           );
-          return response.ok ? ({ ...job, ...((await response.json()) as SmartRecruitersPosting) }) : job;
+          return response.ok
+            ? { ...job, ...((await response.json()) as SmartRecruitersPosting) }
+            : job;
         } catch {
           return job;
         }
@@ -97,7 +113,9 @@ export class SmartRecruitersAdapter implements SourceAdapter {
     return details.map((job) => {
       const companyName = job.company?.name ?? formatBoardToken(boardToken);
       const applyUrl =
-        job.applyUrl ?? job.postingUrl ?? `https://jobs.smartrecruiters.com/${boardToken}/${job.id}`;
+        job.applyUrl ??
+        job.postingUrl ??
+        `https://jobs.smartrecruiters.com/${boardToken}/${job.id}`;
       const branding = resolveCompanyBranding({
         source: this.source,
         boardToken,

@@ -3,9 +3,18 @@ import { ConfigService } from "@nestjs/config";
 import { JobStatus } from "@prisma/client";
 import OpenAI from "openai";
 
-import type { AggregatedJob, ExternalJobSource, SourceBoardConfig } from "@aijobs/types";
+import type {
+  AggregatedJob,
+  ExternalJobSource,
+  SourceBoardConfig,
+} from "@aijobs/types";
 import { splitCsv } from "@aijobs/config";
-import { compareJobsByPostedAt, interleaveBoardJobs, isTargetRole, isUsRelevantJob } from "@aijobs/utils";
+import {
+  compareJobsByPostedAt,
+  interleaveBoardJobs,
+  isTargetRole,
+  isUsRelevantJob,
+} from "@aijobs/utils";
 
 import { AshbyAdapter } from "./adapters/ashby.adapter";
 import { GreenhouseAdapter } from "./adapters/greenhouse.adapter";
@@ -13,9 +22,16 @@ import { LeverAdapter } from "./adapters/lever.adapter";
 import { RecruiteeAdapter } from "./adapters/recruitee.adapter";
 import { SmartRecruitersAdapter } from "./adapters/smartrecruiters.adapter";
 import { WorkableAdapter } from "./adapters/workable.adapter";
-import { getStarterBoardCatalog, getStarterBoards, getStarterBoardSummary } from "./board-catalog";
+import {
+  getStarterBoardCatalog,
+  getStarterBoards,
+  getStarterBoardSummary,
+} from "./board-catalog";
 import { extractBoardsFromText } from "./board-discovery";
-import { getCandidateSeedCompanies, getCandidateSeedGroups } from "./candidate-company-catalog";
+import {
+  getCandidateSeedCompanies,
+  getCandidateSeedGroups,
+} from "./candidate-company-catalog";
 import { formatBoardToken } from "./source-formatters";
 import { getTargetCompanies } from "./target-company-catalog";
 import type { AggregateJobsResult, SourceAdapter } from "./jobs.types";
@@ -23,8 +39,15 @@ import { stripHtml } from "./jobs.utils";
 import { PrismaService } from "../prisma/prisma.service";
 
 type CandidateSourceTier = "top" | "priority" | "growth";
-type CandidateEvidenceKind = "api_url" | "job_posting_url" | "board_root_url" | "unknown";
-type CandidateEvidenceSource = "direct_search" | "openai_citation" | "openai_text";
+type CandidateEvidenceKind =
+  | "api_url"
+  | "job_posting_url"
+  | "board_root_url"
+  | "unknown";
+type CandidateEvidenceSource =
+  | "direct_search"
+  | "openai_citation"
+  | "openai_text";
 type CandidateBoardInput = {
   source: ExternalJobSource;
   boardToken: string;
@@ -145,7 +168,8 @@ export class JobsService {
     @Inject(LeverAdapter) leverAdapter: LeverAdapter,
     @Inject(AshbyAdapter) ashbyAdapter: AshbyAdapter,
     @Inject(WorkableAdapter) workableAdapter: WorkableAdapter,
-    @Inject(SmartRecruitersAdapter) smartRecruitersAdapter: SmartRecruitersAdapter,
+    @Inject(SmartRecruitersAdapter)
+    smartRecruitersAdapter: SmartRecruitersAdapter,
     @Inject(RecruiteeAdapter) recruiteeAdapter: RecruiteeAdapter,
   ) {
     this.adapters = {
@@ -164,12 +188,17 @@ export class JobsService {
     };
 
     const openAiApiKey = this.configService.get<string>("OPENAI_API_KEY");
-    this.openaiClient = openAiApiKey ? new OpenAI({ apiKey: openAiApiKey }) : null;
-    this.openaiBoardFallbackEnabled = this.configService.get<string>("ENABLE_OPENAI_BOARD_FALLBACK") === "true";
+    this.openaiClient = openAiApiKey
+      ? new OpenAI({ apiKey: openAiApiKey })
+      : null;
+    this.openaiBoardFallbackEnabled =
+      this.configService.get<string>("ENABLE_OPENAI_BOARD_FALLBACK") === "true";
     this.openaiCompanySourcingEnabled =
-      this.configService.get<string>("ENABLE_OPENAI_COMPANY_SOURCING") === "true";
+      this.configService.get<string>("ENABLE_OPENAI_COMPANY_SOURCING") ===
+      "true";
     this.openaiCompanyEnrichmentEnabled =
-      this.configService.get<string>("ENABLE_OPENAI_COMPANY_ENRICHMENT") === "true";
+      this.configService.get<string>("ENABLE_OPENAI_COMPANY_ENRICHMENT") ===
+      "true";
   }
 
   listConfiguredSources() {
@@ -186,7 +215,12 @@ export class JobsService {
   async bootstrapCandidateCompanies(groupId?: string) {
     const companies = getCandidateSeedCompanies(groupId).map((company) => ({
       ...company,
-      confidence: company.tier === "top" ? 0.95 : company.tier === "priority" ? 0.88 : 0.78,
+      confidence:
+        company.tier === "top"
+          ? 0.95
+          : company.tier === "priority"
+            ? 0.88
+            : 0.78,
       sourceHint: undefined,
       notes: `Bootstrapped from ${company.origin}`,
     }));
@@ -268,9 +302,14 @@ export class JobsService {
     const parsed = this.parseCandidateSourcingResponse(rawText);
     const candidateItems = this.extractCandidateSourcingItems(parsed);
     const normalizedCompanies = candidateItems
-      .map((company) => this.normalizeSourcedCandidateCompany(company, tier, focusAreas))
-      .filter((company): company is NonNullable<typeof company> => Boolean(company));
-    const dedupedCompanies = await this.filterNewCandidateCompanies(normalizedCompanies);
+      .map((company) =>
+        this.normalizeSourcedCandidateCompany(company, tier, focusAreas),
+      )
+      .filter((company): company is NonNullable<typeof company> =>
+        Boolean(company),
+      );
+    const dedupedCompanies =
+      await this.filterNewCandidateCompanies(normalizedCompanies);
 
     const imported = await this.upsertCandidateCompanies(dedupedCompanies);
 
@@ -282,7 +321,8 @@ export class JobsService {
       llmAssistanceEnabled: true,
       companies: imported.companies,
       debug: {
-        rawTextPreview: dedupedCompanies.length === 0 ? rawText.slice(0, 1200) : undefined,
+        rawTextPreview:
+          dedupedCompanies.length === 0 ? rawText.slice(0, 1200) : undefined,
         parsedCandidateCount: candidateItems.length,
         normalizedCandidateCount: normalizedCompanies.length,
         dedupedCandidateCount: dedupedCompanies.length,
@@ -303,7 +343,10 @@ export class JobsService {
         : DEFAULT_CANDIDATE_FOCUS_AREAS;
 
     const selectedSources = this.resolveBoardFirstSources(input?.customQuery);
-    const limitsBySource = this.distributeBoardSourceLimit(limit, selectedSources);
+    const limitsBySource = this.distributeBoardSourceLimit(
+      limit,
+      selectedSources,
+    );
     const discoveredBySource = await this.harvestDirectBoardCandidates({
       limit,
       sources: selectedSources,
@@ -311,13 +354,23 @@ export class JobsService {
       focusAreas,
       customQuery: input?.customQuery,
     });
-    let discoveredBoards = discoveredBySource.flatMap((entry) => entry.candidates);
+    let discoveredBoards = discoveredBySource.flatMap(
+      (entry) => entry.candidates,
+    );
     let { kept: dedupedCandidates, skipped: skippedDuplicateBoards } =
       await this.filterNewBoardCandidates(discoveredBoards);
     const backfillRounds: Array<Record<string, unknown>> = [];
 
-    if (this.openaiBoardFallbackEnabled && this.openaiClient && dedupedCandidates.length < limit) {
-      for (let round = 1; round <= 2 && dedupedCandidates.length < limit; round += 1) {
+    if (
+      this.openaiBoardFallbackEnabled &&
+      this.openaiClient &&
+      dedupedCandidates.length < limit
+    ) {
+      for (
+        let round = 1;
+        round <= 2 && dedupedCandidates.length < limit;
+        round += 1
+      ) {
         const backfillBySource = await this.harvestBackfillBoardCandidates({
           round,
           sources: selectedSources,
@@ -327,14 +380,18 @@ export class JobsService {
           knownCandidates: discoveredBoards,
           keptCandidates: dedupedCandidates,
         });
-        const backfillCandidates = backfillBySource.flatMap((entry) => entry.candidates);
+        const backfillCandidates = backfillBySource.flatMap(
+          (entry) => entry.candidates,
+        );
 
         if (!backfillCandidates.length) {
           break;
         }
 
         for (const entry of backfillBySource) {
-          const sourceEntry = discoveredBySource.find((item) => item.source === entry.source);
+          const sourceEntry = discoveredBySource.find(
+            (item) => item.source === entry.source,
+          );
           if (!sourceEntry) continue;
 
           sourceEntry.candidates.push(...entry.candidates);
@@ -342,7 +399,10 @@ export class JobsService {
           sourceEntry.pagesFetched += entry.pagesFetched;
         }
 
-        discoveredBoards = this.uniqueBoardCandidates([...discoveredBoards, ...backfillCandidates]);
+        discoveredBoards = this.uniqueBoardCandidates([
+          ...discoveredBoards,
+          ...backfillCandidates,
+        ]);
         ({ kept: dedupedCandidates, skipped: skippedDuplicateBoards } =
           await this.filterNewBoardCandidates(discoveredBoards));
 
@@ -351,7 +411,10 @@ export class JobsService {
           discovered: backfillCandidates.length,
           dedupedTotal: dedupedCandidates.length,
           sourceBreakdown: Object.fromEntries(
-            backfillBySource.map((entry) => [entry.source, entry.candidates.length]),
+            backfillBySource.map((entry) => [
+              entry.source,
+              entry.candidates.length,
+            ]),
           ),
         });
       }
@@ -369,34 +432,39 @@ export class JobsService {
       ),
       Math.min(Math.max(limit * 6, limit), dedupedCandidates.length),
     );
-    const validatedBoards = await this.validateBoardCandidates(validationPool, limit);
+    const validatedBoards = await this.validateBoardCandidates(
+      validationPool,
+      limit,
+    );
     const emptySourceCounts = () =>
-      Object.fromEntries(selectedSources.map((source) => [source, 0])) as Partial<Record<BoardFirstSource, number>>;
-    const createdBoardsBySource = validatedBoards.createdBoards.reduce<Partial<Record<BoardFirstSource, number>>>(
-      (acc, board) => {
-        const sourceName =
-          typeof (board as { sourceName?: unknown }).sourceName === "string"
-            ? ((board as { sourceName: BoardFirstSource }).sourceName)
-            : null;
-        if (sourceName && sourceName in acc) {
-          acc[sourceName] = (acc[sourceName] ?? 0) + 1;
-        }
-        return acc;
-      },
-      emptySourceCounts(),
-    );
-    const failedBoardsBySource = validatedBoards.failedValidations.reduce<Partial<Record<BoardFirstSource, number>>>(
-      (acc, failure) => {
-        const sourceName = SUPPORTED_ATS_SOURCES.has(failure.source as BoardFirstSource)
-          ? (failure.source as BoardFirstSource)
+      Object.fromEntries(
+        selectedSources.map((source) => [source, 0]),
+      ) as Partial<Record<BoardFirstSource, number>>;
+    const createdBoardsBySource = validatedBoards.createdBoards.reduce<
+      Partial<Record<BoardFirstSource, number>>
+    >((acc, board) => {
+      const sourceName =
+        typeof (board as { sourceName?: unknown }).sourceName === "string"
+          ? (board as { sourceName: BoardFirstSource }).sourceName
           : null;
-        if (sourceName && sourceName in acc) {
-          acc[sourceName] = (acc[sourceName] ?? 0) + 1;
-        }
-        return acc;
-      },
-      emptySourceCounts(),
-    );
+      if (sourceName && sourceName in acc) {
+        acc[sourceName] = (acc[sourceName] ?? 0) + 1;
+      }
+      return acc;
+    }, emptySourceCounts());
+    const failedBoardsBySource = validatedBoards.failedValidations.reduce<
+      Partial<Record<BoardFirstSource, number>>
+    >((acc, failure) => {
+      const sourceName = SUPPORTED_ATS_SOURCES.has(
+        failure.source as BoardFirstSource,
+      )
+        ? (failure.source as BoardFirstSource)
+        : null;
+      if (sourceName && sourceName in acc) {
+        acc[sourceName] = (acc[sourceName] ?? 0) + 1;
+      }
+      return acc;
+    }, emptySourceCounts());
 
     return {
       requested: limit,
@@ -407,7 +475,8 @@ export class JobsService {
       skippedDuplicateBoards: skippedDuplicateBoards.slice(0, 10),
       failedValidationCount: validatedBoards.failedValidations.length,
       failedValidations: validatedBoards.failedValidations,
-      llmAssistanceEnabled: this.openaiBoardFallbackEnabled && Boolean(this.openaiClient),
+      llmAssistanceEnabled:
+        this.openaiBoardFallbackEnabled && Boolean(this.openaiClient),
       sources: selectedSources,
       companies: validatedBoards.createdCompanies,
       boards: validatedBoards.createdBoards,
@@ -417,8 +486,12 @@ export class JobsService {
           {
             requested: limitsBySource[entry.source],
             discovered: entry.candidates.length,
-            deduped: dedupedCandidates.filter((candidate) => candidate.source === entry.source).length,
-            skipped: skippedDuplicateBoards.filter((candidate) => candidate.source === entry.source).length,
+            deduped: dedupedCandidates.filter(
+              (candidate) => candidate.source === entry.source,
+            ).length,
+            skipped: skippedDuplicateBoards.filter(
+              (candidate) => candidate.source === entry.source,
+            ).length,
             validated: createdBoardsBySource[entry.source] ?? 0,
             failed: failedBoardsBySource[entry.source] ?? 0,
             pagesFetched: entry.pagesFetched,
@@ -429,8 +502,11 @@ export class JobsService {
       ),
       debug: {
         rawTextPreview: rawText.slice(0, 1200),
-        directSearchBlockedCount: discoveredBySource.filter((entry) => entry.searchBlocked).length,
-        llmAssistanceEnabled: this.openaiBoardFallbackEnabled && Boolean(this.openaiClient),
+        directSearchBlockedCount: discoveredBySource.filter(
+          (entry) => entry.searchBlocked,
+        ).length,
+        llmAssistanceEnabled:
+          this.openaiBoardFallbackEnabled && Boolean(this.openaiClient),
         failedValidationCount: validatedBoards.failedValidations.length,
         failedValidations: validatedBoards.failedValidations.slice(0, 10),
         skippedDuplicateBoards: skippedDuplicateBoards.slice(0, 10),
@@ -461,10 +537,13 @@ export class JobsService {
 
     for (const company of companies) {
       const homepage = this.normalizeUrl(company.homepage);
-      const careersUrl = company.careersUrl ? this.normalizeUrl(company.careersUrl) : null;
+      const careersUrl = company.careersUrl
+        ? this.normalizeUrl(company.careersUrl)
+        : null;
       const normalizedName = this.normalizeCompanyName(company.company);
       const normalizedDomain =
-        company.companyDomain?.trim().toLowerCase() ?? this.domainFromUrl(homepage);
+        company.companyDomain?.trim().toLowerCase() ??
+        this.domainFromUrl(homepage);
 
       if (
         seenNames.has(normalizedName) ||
@@ -496,7 +575,9 @@ export class JobsService {
         notes: company.notes ?? null,
       };
 
-      const existingCandidates = await (this.prisma as any).candidateCompany.findMany({
+      const existingCandidates = await (
+        this.prisma as any
+      ).candidateCompany.findMany({
         where: {
           OR: [
             { company: company.company, homepage },
@@ -518,14 +599,17 @@ export class JobsService {
       const existing =
         existingCandidates.find(
           (candidate: { company: string; homepage: string }) =>
-            candidate.company === company.company && this.normalizeUrl(candidate.homepage) === homepage,
+            candidate.company === company.company &&
+            this.normalizeUrl(candidate.homepage) === homepage,
         ) ??
         existingCandidates.find(
           (candidate: { companyDomain?: string | null }) =>
-            normalizedDomain && candidate.companyDomain?.trim().toLowerCase() === normalizedDomain,
+            normalizedDomain &&
+            candidate.companyDomain?.trim().toLowerCase() === normalizedDomain,
         ) ??
         existingCandidates.find(
-          (candidate: { homepage: string }) => this.normalizeUrl(candidate.homepage) === homepage,
+          (candidate: { homepage: string }) =>
+            this.normalizeUrl(candidate.homepage) === homepage,
         ) ??
         null;
 
@@ -538,7 +622,12 @@ export class JobsService {
             company: company.company,
             homepage,
             ...metadataUpdate,
-            segments: Array.from(new Set([...(existing.segments ?? []), ...(company.segments ?? [])])),
+            segments: Array.from(
+              new Set([
+                ...(existing.segments ?? []),
+                ...(company.segments ?? []),
+              ]),
+            ),
             ...(resetableStatuses.includes(existing.status)
               ? { status: "candidate", lastDiscoveryError: null }
               : {}),
@@ -585,7 +674,9 @@ export class JobsService {
     const seen = new Set<string>();
 
     for (const board of boards) {
-      const source = (board.sourceName ?? board.ats ?? "").trim().toLowerCase() as BoardFirstSource;
+      const source = (board.sourceName ?? board.ats ?? "")
+        .trim()
+        .toLowerCase() as BoardFirstSource;
       const boardToken = board.boardToken?.trim();
 
       if (!SUPPORTED_ATS_SOURCES.has(source) || !boardToken) {
@@ -601,7 +692,10 @@ export class JobsService {
       const normalized = this.normalizeBoardCandidate({
         source,
         boardToken,
-        evidenceUrl: board.boardUrl ?? board.evidenceUrl ?? this.canonicalBoardUrl(source, boardToken),
+        evidenceUrl:
+          board.boardUrl ??
+          board.evidenceUrl ??
+          this.canonicalBoardUrl(source, boardToken),
         evidenceKind: "board_root_url",
         evidenceSource: "direct_search",
       });
@@ -670,14 +764,16 @@ export class JobsService {
         continue;
       }
 
-      const candidateCompany = await this.findOrCreateCandidateCompanyFromBoard({
-        company: board.company,
-        homepage: board.homepage?.trim() || normalized.evidenceUrl,
-        companyDomain: board.companyDomain?.trim() || undefined,
-        source: normalized.source,
-        boardToken: normalized.boardToken,
-        evidenceUrl: normalized.evidenceUrl,
-      });
+      const candidateCompany = await this.findOrCreateCandidateCompanyFromBoard(
+        {
+          company: board.company,
+          homepage: board.homepage?.trim() || normalized.evidenceUrl,
+          companyDomain: board.companyDomain?.trim() || undefined,
+          source: normalized.source,
+          boardToken: normalized.boardToken,
+          evidenceUrl: normalized.evidenceUrl,
+        },
+      );
 
       const candidateBoard = await (this.prisma as any).candidateBoard.upsert({
         where: {
@@ -708,9 +804,15 @@ export class JobsService {
           sourceHint: normalized.source,
           careersUrl: normalized.evidenceUrl,
           segments: board.segments ?? candidateCompany.segments ?? [],
-          origin: board.origin ?? candidateCompany.origin ?? "manual:board-csv-import",
+          origin:
+            board.origin ??
+            candidateCompany.origin ??
+            "manual:board-csv-import",
           notes:
-            [board.notes, `boardImport=${normalized.source}/${normalized.boardToken}`]
+            [
+              board.notes,
+              `boardImport=${normalized.source}/${normalized.boardToken}`,
+            ]
               .filter(Boolean)
               .join(" | ") || candidateCompany.notes,
           lastDiscoveredAt: new Date(),
@@ -759,7 +861,9 @@ export class JobsService {
           sourceHint: enrichment.sourceHint ?? null,
           segments:
             enrichment.segments && enrichment.segments.length > 0
-              ? Array.from(new Set([...candidate.segments, ...enrichment.segments]))
+              ? Array.from(
+                  new Set([...candidate.segments, ...enrichment.segments]),
+                )
               : candidate.segments,
           confidence: enrichment.confidence ?? candidate.confidence,
           notes: enrichment.notes ?? candidate.notes,
@@ -781,7 +885,9 @@ export class JobsService {
     return {
       processed: results.length,
       companies: results,
-      llmAssistanceEnabled: results.some((result) => result.enrichmentSource === "scrape+llm"),
+      llmAssistanceEnabled: results.some(
+        (result) => result.enrichmentSource === "scrape+llm",
+      ),
     };
   }
 
@@ -838,7 +944,8 @@ export class JobsService {
 
     return candidates.sort((left: any, right: any) => {
       const priorityDiff =
-        this.candidateDiscoveryPriority(right) - this.candidateDiscoveryPriority(left);
+        this.candidateDiscoveryPriority(right) -
+        this.candidateDiscoveryPriority(left);
       if (priorityDiff !== 0) {
         return priorityDiff;
       }
@@ -849,7 +956,8 @@ export class JobsService {
       }
 
       const updatedDiff =
-        new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+        new Date(right.updatedAt).getTime() -
+        new Date(left.updatedAt).getTime();
       if (updatedDiff !== 0) {
         return updatedDiff;
       }
@@ -858,12 +966,17 @@ export class JobsService {
     });
   }
 
-  async getCandidatePipelineTargets(input?: { includeNoSupported?: boolean; limit?: number }) {
+  async getCandidatePipelineTargets(input?: {
+    includeNoSupported?: boolean;
+    limit?: number;
+  }) {
     const limit = Math.min(Math.max(input?.limit ?? 500, 1), 1000);
     const candidates = await (this.prisma as any).candidateCompany.findMany({
       where: {
         status: {
-          in: input?.includeNoSupported ? ["candidate", "no_supported_board"] : ["candidate"],
+          in: input?.includeNoSupported
+            ? ["candidate", "no_supported_board"]
+            : ["candidate"],
         },
       },
     });
@@ -871,7 +984,8 @@ export class JobsService {
     return candidates
       .sort((left: any, right: any) => {
         const priorityDiff =
-          this.candidateDiscoveryPriority(right) - this.candidateDiscoveryPriority(left);
+          this.candidateDiscoveryPriority(right) -
+          this.candidateDiscoveryPriority(left);
         if (priorityDiff !== 0) {
           return priorityDiff;
         }
@@ -882,7 +996,8 @@ export class JobsService {
         }
 
         const updatedDiff =
-          new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+          new Date(right.updatedAt).getTime() -
+          new Date(left.updatedAt).getTime();
         if (updatedDiff !== 0) {
           return updatedDiff;
         }
@@ -908,7 +1023,9 @@ export class JobsService {
     }
 
     if (
-      SUPPORTED_ATS_SOURCES.has(candidate.sourceHint as Exclude<ExternalJobSource, "adzuna">)
+      SUPPORTED_ATS_SOURCES.has(
+        candidate.sourceHint as Exclude<ExternalJobSource, "adzuna">,
+      )
     ) {
       priority += 200;
     }
@@ -939,10 +1056,18 @@ export class JobsService {
     });
   }
 
-  async validateCandidateBoards(input?: { limit?: number; sourceName?: string }) {
+  async validateCandidateBoards(input?: {
+    limit?: number;
+    sourceName?: string;
+  }) {
     const limit = Math.min(Math.max(input?.limit ?? 25, 1), 500);
-    const requestedSource = input?.sourceName?.trim().toLowerCase() as BoardFirstSource | undefined;
-    const sourceName = requestedSource && SUPPORTED_ATS_SOURCES.has(requestedSource) ? requestedSource : undefined;
+    const requestedSource = input?.sourceName?.trim().toLowerCase() as
+      | BoardFirstSource
+      | undefined;
+    const sourceName =
+      requestedSource && SUPPORTED_ATS_SOURCES.has(requestedSource)
+        ? requestedSource
+        : undefined;
     const boards = await (this.prisma as any).candidateBoard.findMany({
       where: {
         status: "discovered",
@@ -1058,7 +1183,9 @@ export class JobsService {
         await (this.prisma as any).candidateCompany.update({
           where: { id: board.candidateCompanyId },
           data: {
-            ...(board.candidateCompany.status === "promoted" ? {} : { status: "discovered" }),
+            ...(board.candidateCompany.status === "promoted"
+              ? {}
+              : { status: "discovered" }),
             lastDiscoveredAt: new Date(),
             lastDiscoveryError: null,
           },
@@ -1072,7 +1199,8 @@ export class JobsService {
           jobs: usJobs.length,
         });
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown validation error";
+        const message =
+          error instanceof Error ? error.message : "Unknown validation error";
 
         if (this.isCandidateBoardRateLimit(source, message)) {
           rateLimitedSources.add(source);
@@ -1104,7 +1232,10 @@ export class JobsService {
           },
         });
 
-        await this.updateCandidateCompanyStatusFromBoards(board.candidateCompanyId, message);
+        await this.updateCandidateCompanyStatusFromBoards(
+          board.candidateCompanyId,
+          message,
+        );
 
         results.push({
           id: board.id,
@@ -1125,7 +1256,8 @@ export class JobsService {
       processed: results.length,
       limit,
       sourceName: sourceName ?? null,
-      validated: results.filter((result) => result.status === "validated").length,
+      validated: results.filter((result) => result.status === "validated")
+        .length,
       rejected: results.filter((result) => result.status === "rejected").length,
       deferred: results.filter((result) => result.status === "deferred").length,
       skipped: results.filter((result) => result.status === "skipped").length,
@@ -1139,10 +1271,17 @@ export class JobsService {
     return 0;
   }
 
-  private isCandidateBoardRateLimit(source: ExternalJobSource, message: string) {
+  private isCandidateBoardRateLimit(
+    source: ExternalJobSource,
+    message: string,
+  ) {
     const normalized = message.toLowerCase();
     if (source === "workable") {
-      return normalized.includes("403") || normalized.includes("429") || normalized.includes("rate");
+      return (
+        normalized.includes("403") ||
+        normalized.includes("429") ||
+        normalized.includes("rate")
+      );
     }
     if (source === "recruitee" || source === "smartrecruiters") {
       return normalized.includes("429") || normalized.includes("rate");
@@ -1173,8 +1312,9 @@ export class JobsService {
       return;
     }
 
-    const hasActiveBoard = company.candidateBoards.some((board: { status: string }) =>
-      ["discovered", "validating", "validated"].includes(board.status),
+    const hasActiveBoard = company.candidateBoards.some(
+      (board: { status: string }) =>
+        ["discovered", "validating", "validated"].includes(board.status),
     );
 
     await (this.prisma as any).candidateCompany.update({
@@ -1215,7 +1355,9 @@ export class JobsService {
             where: { id: existingBoard.id },
             data: {
               company: board.candidateCompany.company,
-              companyDomain: board.candidateCompany.companyDomain ?? this.domainFromUrl(board.candidateCompany.homepage),
+              companyDomain:
+                board.candidateCompany.companyDomain ??
+                this.domainFromUrl(board.candidateCompany.homepage),
               active: true,
             },
           })
@@ -1225,7 +1367,8 @@ export class JobsService {
               boardToken: board.boardToken,
               company: board.candidateCompany.company,
               companyDomain:
-                board.candidateCompany.companyDomain ?? this.domainFromUrl(board.candidateCompany.homepage),
+                board.candidateCompany.companyDomain ??
+                this.domainFromUrl(board.candidateCompany.homepage),
               tier: null,
               status: "unverified",
               active: true,
@@ -1271,7 +1414,9 @@ export class JobsService {
     });
 
     const trackedCompanies = new Set(
-      trackedBoards.map((board: { company: string }) => board.company.trim().toLowerCase()),
+      trackedBoards.map((board: { company: string }) =>
+        board.company.trim().toLowerCase(),
+      ),
     );
 
     return getTargetCompanies().filter(
@@ -1279,7 +1424,10 @@ export class JobsService {
     );
   }
 
-  async getBoardsByStatus(status: "unverified" | "working" | "empty" | "failed", source?: ExternalJobSource) {
+  async getBoardsByStatus(
+    status: "unverified" | "working" | "empty" | "failed",
+    source?: ExternalJobSource,
+  ) {
     const rows = await (this.prisma as any).sourceBoard.findMany({
       where: {
         active: true,
@@ -1293,13 +1441,18 @@ export class JobsService {
       orderBy: [{ sourceName: "asc" }, { boardToken: "asc" }],
     });
 
-    return rows.map((row: { sourceName: ExternalJobSource; boardToken: string }) => ({
-      source: row.sourceName,
-      boardToken: row.boardToken,
-    }));
+    return rows.map(
+      (row: { sourceName: ExternalJobSource; boardToken: string }) => ({
+        source: row.sourceName,
+        boardToken: row.boardToken,
+      }),
+    );
   }
 
-  async aggregateJobs(source?: ExternalJobSource, limit = 50): Promise<AggregateJobsResult> {
+  async aggregateJobs(
+    source?: ExternalJobSource,
+    limit = 50,
+  ): Promise<AggregateJobsResult> {
     const result = await this.fetchSourceJobs(source);
 
     return {
@@ -1340,7 +1493,8 @@ export class JobsService {
         this.targetCompanyDomain(job.company) ??
         this.publicCompanyDomainFromUrl(job.applyUrl) ??
         null;
-      const resolvedLogoUrl = job.companyLogoUrl ?? this.logoUrlForDomain(resolvedDomain);
+      const resolvedLogoUrl =
+        job.companyLogoUrl ?? this.logoUrlForDomain(resolvedDomain);
 
       await this.prisma.job.upsert({
         where: { sourceKey: job.id },
@@ -1393,7 +1547,9 @@ export class JobsService {
         sourceName: source,
         boardToken,
         status: JobStatus.active,
-        sourceKey: { notIn: seenSourceKeys.length ? seenSourceKeys : ["__none__"] },
+        sourceKey: {
+          notIn: seenSourceKeys.length ? seenSourceKeys : ["__none__"],
+        },
       },
       data: {
         status: JobStatus.stale,
@@ -1410,7 +1566,10 @@ export class JobsService {
 
   async ingestWorkableXmlFeed(input?: WorkableXmlIngestInput) {
     const limit = Math.min(Math.max(input?.limit ?? 1000, 1), 10000);
-    const maxRecords = Math.min(Math.max(input?.maxRecords ?? 50000, 100), 500000);
+    const maxRecords = Math.min(
+      Math.max(input?.maxRecords ?? 50000, 100),
+      500000,
+    );
     const freshDays = Math.min(Math.max(input?.freshDays ?? 30, 1), 365);
     const dryRun = input?.dryRun ?? false;
     const cutoff = new Date(Date.now() - freshDays * 24 * 60 * 60 * 1000);
@@ -1443,12 +1602,15 @@ export class JobsService {
     const response = await fetch(WORKABLE_XML_FEED_URL, {
       headers: {
         Accept: "application/xml,text/xml;q=0.9,*/*;q=0.8",
-        "User-Agent": "AIJobsBot/0.1 (+https://aijobs.local; workable xml ingestion)",
+        "User-Agent":
+          "AIJobsBot/0.1 (+https://aijobs.local; workable xml ingestion)",
       },
     });
 
     if (!response.ok || !response.body) {
-      throw new Error(`Workable XML feed request failed with ${response.status}`);
+      throw new Error(
+        `Workable XML feed request failed with ${response.status}`,
+      );
     }
 
     const reader = response.body.getReader();
@@ -1467,7 +1629,14 @@ export class JobsService {
 
         buffer += decoder.decode(value, { stream: true });
 
-        const shouldStop = await this.consumeWorkableXmlBuffer(buffer, stats, cutoff, limit, dryRun, dedupeIndex);
+        const shouldStop = await this.consumeWorkableXmlBuffer(
+          buffer,
+          stats,
+          cutoff,
+          limit,
+          dryRun,
+          dedupeIndex,
+        );
         buffer = shouldStop.buffer;
         if (shouldStop.done) {
           stats.stoppedReason = "limit_reached";
@@ -1479,8 +1648,18 @@ export class JobsService {
         stats.stoppedReason = "max_records_reached";
       }
 
-      if (stats.stoppedReason === "feed_complete" && buffer.includes("</job>")) {
-        await this.consumeWorkableXmlBuffer(buffer, stats, cutoff, limit, dryRun, dedupeIndex);
+      if (
+        stats.stoppedReason === "feed_complete" &&
+        buffer.includes("</job>")
+      ) {
+        await this.consumeWorkableXmlBuffer(
+          buffer,
+          stats,
+          cutoff,
+          limit,
+          dryRun,
+          dedupeIndex,
+        );
       }
     } finally {
       if (!reachedFeedEnd) {
@@ -1494,7 +1673,9 @@ export class JobsService {
 
   async getPersistedJobs(input?: { cursor?: string; limit?: number }) {
     const pageSize =
-      typeof input?.limit === "number" && Number.isFinite(input.limit) && input.limit > 0
+      typeof input?.limit === "number" &&
+      Number.isFinite(input.limit) &&
+      input.limit > 0
         ? Math.min(input.limit, 100)
         : 24;
     const cursor = this.decodeFeedCursor(input?.cursor);
@@ -1532,10 +1713,7 @@ export class JobsService {
           postedAt: true,
           updatedAt: true,
         },
-        orderBy: [
-          { updatedAt: "desc" },
-          { sourceKey: "desc" },
-        ],
+        orderBy: [{ updatedAt: "desc" }, { sourceKey: "desc" }],
         take: pageSize + 1,
       }),
       (this.prisma as any).sourceBoard.findMany({
@@ -1548,10 +1726,13 @@ export class JobsService {
     ]);
 
     const boardDomains = new Map<string, string | null>(
-      boardRows.map((row: { sourceName: string; boardToken: string; companyDomain: string | null }) => [
-        `${row.sourceName}:${row.boardToken}`,
-        row.companyDomain,
-      ]),
+      boardRows.map(
+        (row: {
+          sourceName: string;
+          boardToken: string;
+          companyDomain: string | null;
+        }) => [`${row.sourceName}:${row.boardToken}`, row.companyDomain],
+      ),
     );
 
     const hasMore = jobs.length > pageSize;
@@ -1561,7 +1742,9 @@ export class JobsService {
 
     return {
       jobs: this.mapPersistedJobs(pageJobs, boardDomains),
-      nextCursor: hasMore ? this.encodeFeedCursor(pageJobs[pageJobs.length - 1]) : null,
+      nextCursor: hasMore
+        ? this.encodeFeedCursor(pageJobs[pageJobs.length - 1])
+        : null,
       hasMore,
       requestedSources,
       errors: [],
@@ -1585,7 +1768,10 @@ export class JobsService {
     ]);
 
     const persistedByKey = new Map<string, any>(
-      persistedBoards.map((board: any) => [`${board.sourceName}:${board.boardToken}`, board]),
+      persistedBoards.map((board: any) => [
+        `${board.sourceName}:${board.boardToken}`,
+        board,
+      ]),
     );
 
     const merged = seededBoards.map((board) => {
@@ -1620,7 +1806,9 @@ export class JobsService {
     const extras = persistedBoards.filter((board: any) => {
       const key = `${board.sourceName}:${board.boardToken}`;
       return !seededBoards.some(
-        (seed) => seed.source === board.sourceName && seed.boardToken === board.boardToken,
+        (seed) =>
+          seed.source === board.sourceName &&
+          seed.boardToken === board.boardToken,
       );
     });
 
@@ -1629,7 +1817,8 @@ export class JobsService {
         return left.sourceName.localeCompare(right.sourceName);
       }
 
-      const targetDiff = (right.lastTargetJobCount ?? 0) - (left.lastTargetJobCount ?? 0);
+      const targetDiff =
+        (right.lastTargetJobCount ?? 0) - (left.lastTargetJobCount ?? 0);
       if (targetDiff !== 0) {
         return targetDiff;
       }
@@ -1647,59 +1836,60 @@ export class JobsService {
     const since30d = new Date(now.getTime() - 30 * dayMs);
     const since60d = new Date(now.getTime() - 60 * dayMs);
 
-    const [jobStatusCounts, activeJobs, activeBoards, recentJobs] = await Promise.all([
-      this.prisma.job.groupBy({
-        by: ["status"],
-        _count: { _all: true },
-      }),
-      this.prisma.job.findMany({
-        where: {
-          status: JobStatus.active,
-        },
-        select: {
-          sourceName: true,
-          boardToken: true,
-          title: true,
-          company: true,
-          location: true,
-          remoteType: true,
-          postedAt: true,
-          createdAt: true,
-          lastSyncedAt: true,
-        },
-      }),
-      (this.prisma as any).sourceBoard.findMany({
-        where: {
-          active: true,
-        },
-        select: {
-          sourceName: true,
-          status: true,
-          lastCheckedAt: true,
-          lastSeenJobCount: true,
-          lastTargetJobCount: true,
-          totalPersistedJobs: true,
-        },
-      }),
-      this.prisma.job.findMany({
-        where: {
-          status: JobStatus.active,
-        },
-        select: {
-          sourceKey: true,
-          sourceName: true,
-          boardToken: true,
-          title: true,
-          company: true,
-          location: true,
-          remoteType: true,
-          postedAt: true,
-          lastSyncedAt: true,
-        },
-        orderBy: [{ lastSyncedAt: "desc" }, { updatedAt: "desc" }],
-        take: 12,
-      }),
-    ]);
+    const [jobStatusCounts, activeJobs, activeBoards, recentJobs] =
+      await Promise.all([
+        this.prisma.job.groupBy({
+          by: ["status"],
+          _count: { _all: true },
+        }),
+        this.prisma.job.findMany({
+          where: {
+            status: JobStatus.active,
+          },
+          select: {
+            sourceName: true,
+            boardToken: true,
+            title: true,
+            company: true,
+            location: true,
+            remoteType: true,
+            postedAt: true,
+            createdAt: true,
+            lastSyncedAt: true,
+          },
+        }),
+        (this.prisma as any).sourceBoard.findMany({
+          where: {
+            active: true,
+          },
+          select: {
+            sourceName: true,
+            status: true,
+            lastCheckedAt: true,
+            lastSeenJobCount: true,
+            lastTargetJobCount: true,
+            totalPersistedJobs: true,
+          },
+        }),
+        this.prisma.job.findMany({
+          where: {
+            status: JobStatus.active,
+          },
+          select: {
+            sourceKey: true,
+            sourceName: true,
+            boardToken: true,
+            title: true,
+            company: true,
+            location: true,
+            remoteType: true,
+            postedAt: true,
+            lastSyncedAt: true,
+          },
+          orderBy: [{ lastSyncedAt: "desc" }, { updatedAt: "desc" }],
+          take: 12,
+        }),
+      ]);
 
     const statusCounts = Object.fromEntries(
       jobStatusCounts.map((row) => [row.status, row._count._all]),
@@ -1738,15 +1928,40 @@ export class JobsService {
     const byCategory = new Map<string, number>();
     const byWorkMode = new Map<string, number>();
     const byLocation = new Map<string, number>();
+    const byCountryScope = new Map<string, number>();
+    const qualityFlags = new Map<string, number>();
     const byCompany = new Map<string, number>();
     let latestJobSyncAt: Date | null = null;
 
     for (const job of activeJobs) {
+      const category = this.classifyJobCategory(job.title);
+      const workMode = this.classifyWorkMode(job.remoteType, job.location);
+      const locationSignal = this.classifyRegistryLocation(
+        job.location,
+        job.remoteType,
+      );
+      const countryScope = this.classifyCountryScope(
+        job.location,
+        job.remoteType,
+      );
+
       this.incrementCount(bySource, job.sourceName);
-      this.incrementCount(byCategory, this.classifyJobCategory(job.title));
-      this.incrementCount(byWorkMode, this.classifyWorkMode(job.remoteType, job.location));
-      this.incrementCount(byLocation, this.classifyRegistryLocation(job.location, job.remoteType));
+      this.incrementCount(byCategory, category);
+      this.incrementCount(byWorkMode, workMode);
+      this.incrementCount(byLocation, locationSignal);
+      this.incrementCount(byCountryScope, countryScope);
       this.incrementCount(byCompany, job.company);
+
+      if (category === "Other")
+        this.incrementCount(qualityFlags, "Uncategorized role");
+      if (workMode === "Unknown")
+        this.incrementCount(qualityFlags, "Unknown work mode");
+      if (countryScope === "Unknown")
+        this.incrementCount(qualityFlags, "Unknown country");
+      if (countryScope === "Non-US")
+        this.incrementCount(qualityFlags, "Non-US visible");
+      if (!job.postedAt)
+        this.incrementCount(qualityFlags, "Unknown posted date");
 
       if (!latestJobSyncAt || job.lastSyncedAt > latestJobSyncAt) {
         latestJobSyncAt = job.lastSyncedAt;
@@ -1820,7 +2035,10 @@ export class JobsService {
     return {
       generatedAt: now.toISOString(),
       jobs: {
-        total: activeJobs.length + (statusCounts.stale ?? 0) + (statusCounts.inactive ?? 0),
+        total:
+          activeJobs.length +
+          (statusCounts.stale ?? 0) +
+          (statusCounts.inactive ?? 0),
         active: activeJobs.length,
         stale: statusCounts.stale ?? 0,
         inactive: statusCounts.inactive ?? 0,
@@ -1837,6 +2055,8 @@ export class JobsService {
         byCategory: this.countMapToRows(byCategory),
         byWorkMode: this.countMapToRows(byWorkMode),
         byLocation: this.countMapToRows(byLocation),
+        byCountryScope: this.countMapToRows(byCountryScope),
+        qualityFlags: this.countMapToRows(qualityFlags),
         topCompanies: this.countMapToRows(byCompany).slice(0, 10),
         recent: recentJobs.map((job) => ({
           sourceKey: job.sourceKey,
@@ -1846,6 +2066,9 @@ export class JobsService {
           company: job.company,
           location: job.location,
           remoteType: job.remoteType,
+          roleCategory: this.classifyJobCategory(job.title),
+          workMode: this.classifyWorkMode(job.remoteType, job.location),
+          countryScope: this.classifyCountryScope(job.location, job.remoteType),
           postedAt: job.postedAt?.toISOString() ?? null,
           lastSyncedAt: job.lastSyncedAt.toISOString(),
         })),
@@ -1857,11 +2080,13 @@ export class JobsService {
         bySource: this.countMapToRows(boardSource),
         freshness: boardFreshness,
         totalTargetJobsLastRun: activeBoards.reduce(
-          (sum: number, board: { lastTargetJobCount: number | null }) => sum + (board.lastTargetJobCount ?? 0),
+          (sum: number, board: { lastTargetJobCount: number | null }) =>
+            sum + (board.lastTargetJobCount ?? 0),
           0,
         ),
         totalPersistedJobsReported: activeBoards.reduce(
-          (sum: number, board: { totalPersistedJobs: number | null }) => sum + (board.totalPersistedJobs ?? 0),
+          (sum: number, board: { totalPersistedJobs: number | null }) =>
+            sum + (board.totalPersistedJobs ?? 0),
           0,
         ),
       },
@@ -1880,7 +2105,11 @@ export class JobsService {
 
   async markCandidateCompanyDiscoveryResult(input: {
     candidateCompanyId: string;
-    discoveredBoards: Array<{ source: string; boardToken: string; evidenceUrl?: string }>;
+    discoveredBoards: Array<{
+      source: string;
+      boardToken: string;
+      evidenceUrl?: string;
+    }>;
     errors: Array<{ url: string; message: string }>;
   }) {
     for (const board of input.discoveredBoards) {
@@ -1910,60 +2139,90 @@ export class JobsService {
     await (this.prisma as any).candidateCompany.update({
       where: { id: input.candidateCompanyId },
       data: {
-        status: input.discoveredBoards.length > 0 ? "discovered" : "no_supported_board",
+        status:
+          input.discoveredBoards.length > 0
+            ? "discovered"
+            : "no_supported_board",
         lastDiscoveredAt: new Date(),
         lastDiscoveryError:
           input.discoveredBoards.length === 0 && input.errors.length > 0
-            ? input.errors.map((error) => `${error.url}: ${error.message}`).slice(0, 3).join(" | ")
+            ? input.errors
+                .map((error) => `${error.url}: ${error.message}`)
+                .slice(0, 3)
+                .join(" | ")
             : null,
       },
     });
   }
 
-  private getConfiguredBoards(filterSource?: ExternalJobSource): SourceBoardConfig[] {
-    const greenhouse = splitCsv(this.configService.get<string>("GREENHOUSE_BOARD_TOKENS")).map((boardToken) => ({
+  private getConfiguredBoards(
+    filterSource?: ExternalJobSource,
+  ): SourceBoardConfig[] {
+    const greenhouse = splitCsv(
+      this.configService.get<string>("GREENHOUSE_BOARD_TOKENS"),
+    ).map((boardToken) => ({
       source: "greenhouse" as const,
       boardToken,
     }));
 
-    const lever = splitCsv(this.configService.get<string>("LEVER_COMPANY_HANDLES")).map((boardToken) => ({
+    const lever = splitCsv(
+      this.configService.get<string>("LEVER_COMPANY_HANDLES"),
+    ).map((boardToken) => ({
       source: "lever" as const,
       boardToken,
     }));
 
-    const ashby = splitCsv(this.configService.get<string>("ASHBY_JOB_BOARD_NAMES")).map((boardToken) => ({
+    const ashby = splitCsv(
+      this.configService.get<string>("ASHBY_JOB_BOARD_NAMES"),
+    ).map((boardToken) => ({
       source: "ashby" as const,
       boardToken,
     }));
 
-    const workable = splitCsv(this.configService.get<string>("WORKABLE_ACCOUNT_SUBDOMAINS")).map((boardToken) => ({
+    const workable = splitCsv(
+      this.configService.get<string>("WORKABLE_ACCOUNT_SUBDOMAINS"),
+    ).map((boardToken) => ({
       source: "workable" as const,
       boardToken,
     }));
 
-    const smartRecruiters = splitCsv(this.configService.get<string>("SMARTRECRUITERS_COMPANY_IDS")).map((boardToken) => ({
+    const smartRecruiters = splitCsv(
+      this.configService.get<string>("SMARTRECRUITERS_COMPANY_IDS"),
+    ).map((boardToken) => ({
       source: "smartrecruiters" as const,
       boardToken,
     }));
 
-    const recruitee = splitCsv(this.configService.get<string>("RECRUITEE_COMPANY_SUBDOMAINS")).map((boardToken) => ({
+    const recruitee = splitCsv(
+      this.configService.get<string>("RECRUITEE_COMPANY_SUBDOMAINS"),
+    ).map((boardToken) => ({
       source: "recruitee" as const,
       boardToken,
     }));
 
     const seeded = getStarterBoards(filterSource);
-    const envBoards = [...greenhouse, ...lever, ...ashby, ...workable, ...smartRecruiters, ...recruitee];
+    const envBoards = [
+      ...greenhouse,
+      ...lever,
+      ...ashby,
+      ...workable,
+      ...smartRecruiters,
+      ...recruitee,
+    ];
     const all = [...seeded, ...envBoards]
       .filter((item) => (filterSource ? item.source === filterSource : true))
       .filter(
         (item, index, array) =>
           array.findIndex(
             (candidate) =>
-              candidate.source === item.source && candidate.boardToken === item.boardToken,
+              candidate.source === item.source &&
+              candidate.boardToken === item.boardToken,
           ) === index,
       );
 
-    return filterSource ? all.filter((item) => item.source === filterSource) : all;
+    return filterSource
+      ? all.filter((item) => item.source === filterSource)
+      : all;
   }
 
   private async fetchSourceJobs(source?: ExternalJobSource) {
@@ -1984,7 +2243,11 @@ export class JobsService {
     );
 
     const boardJobs: AggregatedJob[][] = [];
-    const boardResults: Array<{ source: ExternalJobSource; boardToken: string; jobs: AggregatedJob[] }> = [];
+    const boardResults: Array<{
+      source: ExternalJobSource;
+      boardToken: string;
+      jobs: AggregatedJob[];
+    }> = [];
     const errors: AggregateJobsResult["errors"] = [];
 
     settled.forEach((result, index) => {
@@ -2000,7 +2263,10 @@ export class JobsService {
         errors.push({
           source: item.source,
           boardToken: item.boardToken,
-          message: result.reason instanceof Error ? result.reason.message : "Unknown fetch error",
+          message:
+            result.reason instanceof Error
+              ? result.reason.message
+              : "Unknown fetch error",
         });
       }
     });
@@ -2037,7 +2303,13 @@ export class JobsService {
       buffer = buffer.slice(endIndex + "</job>".length);
       stats.seen += 1;
 
-      await this.processWorkableXmlJob(block, stats, cutoff, dryRun, dedupeIndex);
+      await this.processWorkableXmlJob(
+        block,
+        stats,
+        cutoff,
+        dryRun,
+        dedupeIndex,
+      );
     }
 
     return {
@@ -2170,7 +2442,13 @@ export class JobsService {
           firstSeenAt: new Date(),
           lastSeenAt: new Date(),
           lastSyncedAt: new Date(),
-          contentHash: this.workableXmlContentHash({ title, company, location, workMode, description }),
+          contentHash: this.workableXmlContentHash({
+            title,
+            company,
+            location,
+            workMode,
+            description,
+          }),
           status: JobStatus.active,
         },
         update: {
@@ -2187,7 +2465,13 @@ export class JobsService {
           sourceUpdatedAt: postedAt,
           lastSeenAt: new Date(),
           lastSyncedAt: new Date(),
-          contentHash: this.workableXmlContentHash({ title, company, location, workMode, description }),
+          contentHash: this.workableXmlContentHash({
+            title,
+            company,
+            location,
+            workMode,
+            description,
+          }),
           status: JobStatus.active,
           syncCount: { increment: 1 },
         },
@@ -2237,7 +2521,10 @@ export class JobsService {
       sourceKey: input.sourceKey,
       title: input.title,
       company: input.company,
-      message: input.error instanceof Error ? input.error.message : "Unknown persistence error",
+      message:
+        input.error instanceof Error
+          ? input.error.message
+          : "Unknown persistence error",
     });
   }
 
@@ -2257,7 +2544,9 @@ export class JobsService {
   }
 
   private xmlField(block: string, field: keyof WorkableXmlJob) {
-    const match = block.match(new RegExp(`<${field}>([\\s\\S]*?)<\\/${field}>`, "i"));
+    const match = block.match(
+      new RegExp(`<${field}>([\\s\\S]*?)<\\/${field}>`, "i"),
+    );
     return match ? this.decodeXmlValue(match[1]) : null;
   }
 
@@ -2269,7 +2558,7 @@ export class JobsService {
       .replace(/\]\]>$/, "")
       .replace(/&nbsp;/gi, " ")
       .replace(/&amp;/gi, "&")
-      .replace(/&quot;/gi, "\"")
+      .replace(/&quot;/gi, '"')
       .replace(/&#39;|&apos;/gi, "'")
       .replace(/&lt;/gi, "<")
       .replace(/&gt;/gi, ">")
@@ -2279,7 +2568,10 @@ export class JobsService {
 
   private workableXmlLocation(job: WorkableXmlJob) {
     const country = this.normalizeWorkableXmlCountry(job.country);
-    return [job.city, job.state, country].map((part) => part?.trim()).filter(Boolean).join(", ");
+    return [job.city, job.state, country]
+      .map((part) => part?.trim())
+      .filter(Boolean)
+      .join(", ");
   }
 
   private normalizeWorkableXmlCountry(country?: string | null) {
@@ -2297,7 +2589,9 @@ export class JobsService {
   private workableXmlRemoteType(remote?: string | null) {
     const normalized = remote?.trim().toLowerCase();
     if (!normalized) return null;
-    return ["true", "1", "yes", "remote"].includes(normalized) ? "remote" : null;
+    return ["true", "1", "yes", "remote"].includes(normalized)
+      ? "remote"
+      : null;
   }
 
   private workableXmlContentHash(job: {
@@ -2364,27 +2658,37 @@ export class JobsService {
     index.byCompanyTitle.set(companyTitleKey, companyTitleRows);
   }
 
-  private findDuplicatePersistedJob(index: PersistedJobDedupeIndex, input: {
-    sourceKey: string;
-    sourceId: string;
-    title: string;
-    company: string;
-    location: string;
-    applyUrl: string;
-  }) {
+  private findDuplicatePersistedJob(
+    index: PersistedJobDedupeIndex,
+    input: {
+      sourceKey: string;
+      sourceId: string;
+      title: string;
+      company: string;
+      location: string;
+      applyUrl: string;
+    },
+  ) {
     const exactSourceKey = index.bySourceKey.get(input.sourceKey);
     if (exactSourceKey) return exactSourceKey;
 
-    const exactApplyUrl = index.byApplyUrl.get(this.normalizeUrl(input.applyUrl));
+    const exactApplyUrl = index.byApplyUrl.get(
+      this.normalizeUrl(input.applyUrl),
+    );
     if (exactApplyUrl) return exactApplyUrl;
 
     const sameWorkableId = index.byWorkableId.get(input.sourceId);
     if (sameWorkableId) return sameWorkableId;
 
-    const candidates = index.byCompanyTitle.get(this.companyTitleDedupeKey(input.company, input.title)) ?? [];
-    return candidates.find((candidate) =>
-      this.locationsCompatibleForDedupe(candidate.location, input.location),
-    ) ?? null;
+    const candidates =
+      index.byCompanyTitle.get(
+        this.companyTitleDedupeKey(input.company, input.title),
+      ) ?? [];
+    return (
+      candidates.find((candidate) =>
+        this.locationsCompatibleForDedupe(candidate.location, input.location),
+      ) ?? null
+    );
   }
 
   private companyTitleDedupeKey(company: string, title: string) {
@@ -2401,7 +2705,9 @@ export class JobsService {
     }
 
     const sourceKeyParts = row.sourceKey.split(":");
-    return sourceKeyParts.length >= 3 ? sourceKeyParts[sourceKeyParts.length - 1] : null;
+    return sourceKeyParts.length >= 3
+      ? sourceKeyParts[sourceKeyParts.length - 1]
+      : null;
   }
 
   private normalizeJobDedupeText(value?: string | null) {
@@ -2414,7 +2720,10 @@ export class JobsService {
       .trim();
   }
 
-  private locationsCompatibleForDedupe(left?: string | null, right?: string | null) {
+  private locationsCompatibleForDedupe(
+    left?: string | null,
+    right?: string | null,
+  ) {
     const leftSignal = this.locationDedupeSignal(left);
     const rightSignal = this.locationDedupeSignal(right);
 
@@ -2432,7 +2741,9 @@ export class JobsService {
     const isRemote = /\bremote\b/.test(normalized);
     const isUs =
       /\bunited states\b|\busa\b|\bu\.s\.\b|\bus\b/.test(normalized) ||
-      /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia)\b/.test(normalized);
+      /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia)\b/.test(
+        normalized,
+      );
 
     if (isRemote && isUs) return "remote-us";
     if (isUs) return "us";
@@ -2515,7 +2826,8 @@ export class JobsService {
 
     let careersUrl = candidate.careersUrl;
     let sourceHint: string | null = null;
-    let companyDomain = candidate.companyDomain ?? this.domainFromUrl(candidate.homepage);
+    let companyDomain =
+      candidate.companyDomain ?? this.domainFromUrl(candidate.homepage);
     const scrapedSignals: Array<{ url: string; html: string }> = [];
     const errors: string[] = [];
 
@@ -2524,7 +2836,10 @@ export class JobsService {
         const page = await this.fetchPage(url);
         scrapedSignals.push(page);
 
-        const boards = extractBoardsFromText(`${page.url}\n${page.html}`, page.url);
+        const boards = extractBoardsFromText(
+          `${page.url}\n${page.html}`,
+          page.url,
+        );
         if (boards.length > 0) {
           careersUrl = boards[0]?.evidenceUrl ?? page.url;
           sourceHint = boards[0]?.source ?? sourceHint;
@@ -2539,11 +2854,18 @@ export class JobsService {
           break;
         }
       } catch (error) {
-        errors.push(error instanceof Error ? error.message : "Unknown enrichment error");
+        errors.push(
+          error instanceof Error ? error.message : "Unknown enrichment error",
+        );
       }
     }
 
-    if (this.openaiCompanyEnrichmentEnabled && this.openaiClient && !sourceHint && !careersUrl) {
+    if (
+      this.openaiCompanyEnrichmentEnabled &&
+      this.openaiClient &&
+      !sourceHint &&
+      !careersUrl
+    ) {
       const llmResult = await this.runLlmCompanyEnrichment({
         company: candidate.company,
         homepage: candidate.homepage,
@@ -2576,7 +2898,8 @@ export class JobsService {
       segments: [],
       confidence: sourceHint ? 0.78 : null,
       notes: sourceHint ? "ATS source inferred from scraping." : null,
-      enrichmentSource: sourceHint || careersUrl ? "scrape-only" : "scrape-only:no-llm",
+      enrichmentSource:
+        sourceHint || careersUrl ? "scrape-only" : "scrape-only:no-llm",
       error: errors.length ? errors.join(" | ") : null,
     };
   }
@@ -2642,7 +2965,9 @@ export class JobsService {
       return false;
     }
 
-    return !/\.(?:avif|bmp|css|gif|ico|jpeg|jpg|js|map|mp4|pdf|png|svg|webp|woff2?)$/i.test(pathname);
+    return !/\.(?:avif|bmp|css|gif|ico|jpeg|jpg|js|map|mp4|pdf|png|svg|webp|woff2?)$/i.test(
+      pathname,
+    );
   }
 
   private async runLlmCompanyEnrichment(input: {
@@ -2658,7 +2983,10 @@ export class JobsService {
     }
 
     const pageSummary = input.pages
-      .map((page) => `URL: ${page.url}\nHTML Snippet:\n${page.html.replace(/\s+/g, " ").slice(0, 3000)}`)
+      .map(
+        (page) =>
+          `URL: ${page.url}\nHTML Snippet:\n${page.html.replace(/\s+/g, " ").slice(0, 3000)}`,
+      )
       .join("\n\n");
 
     try {
@@ -2704,7 +3032,8 @@ Return strict JSON:
         companyDomain: parsed.companyDomain ?? null,
         sourceHint: parsed.sourceHint ?? null,
         segments: Array.isArray(parsed.segments) ? parsed.segments : [],
-        confidence: typeof parsed.confidence === "number" ? parsed.confidence : null,
+        confidence:
+          typeof parsed.confidence === "number" ? parsed.confidence : null,
         notes: parsed.notes ?? null,
       };
     } catch {
@@ -2718,17 +3047,20 @@ Return strict JSON:
     focusAreas: string[];
     customQuery?: string;
   }) {
-    const sourceQueryGuidance: Record<Exclude<ExternalJobSource, "adzuna">, string[]> = {
+    const sourceQueryGuidance: Record<
+      Exclude<ExternalJobSource, "adzuna">,
+      string[]
+    > = {
       greenhouse: [
-        'Search for direct Greenhouse board roots, using evidence like site:boards.greenhouse.io or site:job-boards.greenhouse.io.',
+        "Search for direct Greenhouse board roots, using evidence like site:boards.greenhouse.io or site:job-boards.greenhouse.io.",
         "Ignore company homepages and ignore Greenhouse job detail URLs if the board root is not visible.",
       ],
       lever: [
-        'Search for direct Lever board roots using evidence like site:jobs.lever.co.',
+        "Search for direct Lever board roots using evidence like site:jobs.lever.co.",
         "Ignore company pages unless the actual jobs.lever.co URL is visible in the result source.",
       ],
       ashby: [
-        'Search for direct Ashby board roots using evidence like site:jobs.ashbyhq.com.',
+        "Search for direct Ashby board roots using evidence like site:jobs.ashbyhq.com.",
         "Be conservative with Ashby: only include URLs that appear directly in search source URLs, not guessed slugs.",
       ],
       workable: [
@@ -2745,8 +3077,12 @@ Return strict JSON:
       ],
     };
 
-    const sourcePatterns: Record<Exclude<ExternalJobSource, "adzuna">, string> = {
-      greenhouse: "https://boards.greenhouse.io/<token> or https://job-boards.greenhouse.io/<token>",
+    const sourcePatterns: Record<
+      Exclude<ExternalJobSource, "adzuna">,
+      string
+    > = {
+      greenhouse:
+        "https://boards.greenhouse.io/<token> or https://job-boards.greenhouse.io/<token>",
       lever: "https://jobs.lever.co/<token>",
       ashby: "https://jobs.ashbyhq.com/<token>",
       workable: "https://apply.workable.com/<token>",
@@ -2776,8 +3112,10 @@ Return strict JSON:
   }) {
     const tierGuidance = {
       top: "Focus on FAANG-plus, globally recognized technology companies, and category-defining employers.",
-      priority: "Focus on strong AI, cloud, developer tools, fintech, productivity, and enterprise software companies.",
-      growth: "Focus on broader high-signal growth-stage and mid-market technology companies with strong product teams.",
+      priority:
+        "Focus on strong AI, cloud, developer tools, fintech, productivity, and enterprise software companies.",
+      growth:
+        "Focus on broader high-signal growth-stage and mid-market technology companies with strong product teams.",
     } satisfies Record<CandidateSourceTier, string>;
 
     return [
@@ -2804,7 +3142,9 @@ Return strict JSON:
         null,
         2,
       ),
-      input.customQuery ? `Extra sourcing guidance: ${input.customQuery}` : null,
+      input.customQuery
+        ? `Extra sourcing guidance: ${input.customQuery}`
+        : null,
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -2839,7 +3179,9 @@ Return strict JSON:
           const arrayEnd = text.lastIndexOf("]");
           if (arrayStart >= 0 && arrayEnd > arrayStart) {
             try {
-              const items = JSON.parse(this.stripJsonFences(text.slice(arrayStart, arrayEnd + 1)));
+              const items = JSON.parse(
+                this.stripJsonFences(text.slice(arrayStart, arrayEnd + 1)),
+              );
               return { companies: Array.isArray(items) ? items : [] };
             } catch {
               return {};
@@ -2861,26 +3203,39 @@ Return strict JSON:
     }
 
     const aliases: Record<BoardFirstSource, string[]> = {
-      greenhouse: ["greenhouse", "boards.greenhouse.io", "job-boards.greenhouse.io"],
+      greenhouse: [
+        "greenhouse",
+        "boards.greenhouse.io",
+        "job-boards.greenhouse.io",
+      ],
       lever: ["lever", "jobs.lever.co"],
       ashby: ["ashby", "ashbyhq", "jobs.ashbyhq.com"],
       workable: ["workable", "apply.workable.com"],
-      smartrecruiters: ["smartrecruiters", "smart recruiters", "careers.smartrecruiters.com", "jobs.smartrecruiters.com"],
+      smartrecruiters: [
+        "smartrecruiters",
+        "smart recruiters",
+        "careers.smartrecruiters.com",
+        "jobs.smartrecruiters.com",
+      ],
       recruitee: ["recruitee"],
     };
 
     const explicitIncludes = BOARD_FIRST_SOURCES.filter((source) =>
       aliases[source].some((alias) => text.includes(alias)),
     );
-    let selected = explicitIncludes.length ? explicitIncludes : [...BOARD_FIRST_SOURCES];
-    const exclusionClauses = text.match(/(?:exclude|excluding|without|skip|omit)[^.;&\n]+/g) ?? [];
+    let selected = explicitIncludes.length
+      ? explicitIncludes
+      : [...BOARD_FIRST_SOURCES];
+    const exclusionClauses =
+      text.match(/(?:exclude|excluding|without|skip|omit)[^.;&\n]+/g) ?? [];
 
     selected = selected.filter((source) => {
       const denied = aliases[source].some((alias) => {
         const compactAlias = alias.replace(/\s+/g, "");
         return (
-          exclusionClauses.some((clause) => clause.includes(alias) || clause.includes(compactAlias)) ||
-          text.includes(`not ${alias}`)
+          exclusionClauses.some(
+            (clause) => clause.includes(alias) || clause.includes(compactAlias),
+          ) || text.includes(`not ${alias}`)
         );
       });
 
@@ -2890,7 +3245,10 @@ Return strict JSON:
     return selected.length ? selected : [...BOARD_FIRST_SOURCES];
   }
 
-  private distributeBoardSourceLimit(limit: number, sources: BoardFirstSource[] = BOARD_FIRST_SOURCES) {
+  private distributeBoardSourceLimit(
+    limit: number,
+    sources: BoardFirstSource[] = BOARD_FIRST_SOURCES,
+  ) {
     const selectedSources = sources.length ? sources : BOARD_FIRST_SOURCES;
     const perSource = Math.floor(limit / selectedSources.length);
     let remainder = limit % selectedSources.length;
@@ -2918,12 +3276,18 @@ Return strict JSON:
     focusAreas: string[];
     customQuery?: string;
   }) {
-    const hostsBySource: Record<Exclude<ExternalJobSource, "adzuna">, string[]> = {
+    const hostsBySource: Record<
+      Exclude<ExternalJobSource, "adzuna">,
+      string[]
+    > = {
       greenhouse: ["boards.greenhouse.io", "job-boards.greenhouse.io"],
       lever: ["jobs.lever.co"],
       ashby: ["jobs.ashbyhq.com"],
       workable: ["apply.workable.com"],
-      smartrecruiters: ["careers.smartrecruiters.com", "jobs.smartrecruiters.com"],
+      smartrecruiters: [
+        "careers.smartrecruiters.com",
+        "jobs.smartrecruiters.com",
+      ],
       recruitee: ["recruitee.com"],
     };
 
@@ -3033,11 +3397,15 @@ Return strict JSON:
 
     const focusTerms = Array.from(
       new Set(
-        input.focusAreas.flatMap((area) => focusTermsByArea[area.toLowerCase()] ?? [area.toLowerCase()]),
+        input.focusAreas.flatMap(
+          (area) =>
+            focusTermsByArea[area.toLowerCase()] ?? [area.toLowerCase()],
+        ),
       ),
     ).slice(0, 72);
 
-    const usClause = '"United States" OR "Remote US" OR "Remote, US" OR USA OR "New York" OR "San Francisco"';
+    const usClause =
+      '"United States" OR "Remote US" OR "Remote, US" OR USA OR "New York" OR "San Francisco"';
     const roleGroups = this.chunkSearchTerms(focusTerms, 4);
 
     return hostsBySource[input.source].flatMap((host) => {
@@ -3050,9 +3418,7 @@ Return strict JSON:
         ];
       });
 
-      queries.push(
-        `site:${host} ${input.source} board`,
-      );
+      queries.push(`site:${host} ${input.source} board`);
 
       if (input.customQuery?.trim()) {
         queries.push(`site:${host} ${input.customQuery.trim()}`);
@@ -3069,7 +3435,16 @@ Return strict JSON:
       chunks.push(terms.slice(index, index + size));
     }
 
-    return chunks.length ? chunks : [["software engineer", "data engineer", "qa engineer", "product manager"]];
+    return chunks.length
+      ? chunks
+      : [
+          [
+            "software engineer",
+            "data engineer",
+            "qa engineer",
+            "product manager",
+          ],
+        ];
   }
 
   private async harvestDirectBoardCandidates(input: {
@@ -3099,7 +3474,11 @@ Return strict JSON:
         for (const query of queries) {
           queriesTried += 1;
 
-          for (let pageIndex = 0; pageIndex < maxPagesPerQuery; pageIndex += 1) {
+          for (
+            let pageIndex = 0;
+            pageIndex < maxPagesPerQuery;
+            pageIndex += 1
+          ) {
             const offset = pageIndex * 30;
             let html = "";
 
@@ -3121,7 +3500,8 @@ Return strict JSON:
               break;
             }
 
-            const pageCandidates = this.extractBoardCandidatesFromSearchResponse(html, source);
+            const pageCandidates =
+              this.extractBoardCandidatesFromSearchResponse(html, source);
             let addedFromPage = 0;
 
             for (const candidate of pageCandidates) {
@@ -3149,8 +3529,15 @@ Return strict JSON:
           }
         }
 
-        if (this.openaiBoardFallbackEnabled && this.openaiClient && candidates.length < targetCandidates) {
-          const fallbackTarget = Math.min(targetCandidates, Math.max(requested * 2, 40));
+        if (
+          this.openaiBoardFallbackEnabled &&
+          this.openaiClient &&
+          candidates.length < targetCandidates
+        ) {
+          const fallbackTarget = Math.min(
+            targetCandidates,
+            Math.max(requested * 2, 40),
+          );
           const fallbackQueries = this.buildBoardSourceFallbackQueries({
             source,
             focusAreas: input.focusAreas,
@@ -3166,7 +3553,10 @@ Return strict JSON:
               query,
               focusAreas: input.focusAreas,
             });
-            const pageCandidates = this.extractBoardCandidatesFromSourceUrls(sourceUrls, source)
+            const pageCandidates = this.extractBoardCandidatesFromSourceUrls(
+              sourceUrls,
+              source,
+            )
               .map((board) =>
                 this.normalizeBoardCandidate({
                   source: board.source,
@@ -3176,9 +3566,15 @@ Return strict JSON:
                   evidenceSource: board.evidenceSource,
                 }),
               )
-              .filter((candidate): candidate is CandidateBoardInput => Boolean(candidate))
-              .filter((candidate) => this.shouldKeepFallbackBoardCandidate(candidate))
-              .sort((left, right) => this.compareBoardCandidateEvidence(left, right));
+              .filter((candidate): candidate is CandidateBoardInput =>
+                Boolean(candidate),
+              )
+              .filter((candidate) =>
+                this.shouldKeepFallbackBoardCandidate(candidate),
+              )
+              .sort((left, right) =>
+                this.compareBoardCandidateEvidence(left, right),
+              );
 
             for (const candidate of pageCandidates) {
               const key = `${candidate.source}:${candidate.boardToken}`;
@@ -3223,7 +3619,9 @@ Return strict JSON:
     return Promise.all(
       input.sources.map(async (source) => {
         const requested = input.limitsBySource[source];
-        const keptForSource = input.keptCandidates.filter((candidate) => candidate.source === source).length;
+        const keptForSource = input.keptCandidates.filter(
+          (candidate) => candidate.source === source,
+        ).length;
         const needed = Math.max(requested - keptForSource, 0);
 
         if (needed === 0) {
@@ -3236,7 +3634,10 @@ Return strict JSON:
         }
 
         const seenKeys = new Set(
-          input.knownCandidates.map((candidate) => `${candidate.source}:${candidate.boardToken.toLowerCase()}`),
+          input.knownCandidates.map(
+            (candidate) =>
+              `${candidate.source}:${candidate.boardToken.toLowerCase()}`,
+          ),
         );
         const avoidTokens = input.knownCandidates
           .filter((candidate) => candidate.source === source)
@@ -3261,7 +3662,10 @@ Return strict JSON:
             query,
             focusAreas: input.focusAreas,
           });
-          const pageCandidates = this.extractBoardCandidatesFromSourceUrls(sourceUrls, source)
+          const pageCandidates = this.extractBoardCandidatesFromSourceUrls(
+            sourceUrls,
+            source,
+          )
             .map((board) =>
               this.normalizeBoardCandidate({
                 source: board.source,
@@ -3271,9 +3675,15 @@ Return strict JSON:
                 evidenceSource: board.evidenceSource,
               }),
             )
-            .filter((candidate): candidate is CandidateBoardInput => Boolean(candidate))
-            .filter((candidate) => this.shouldKeepFallbackBoardCandidate(candidate))
-            .sort((left, right) => this.compareBoardCandidateEvidence(left, right));
+            .filter((candidate): candidate is CandidateBoardInput =>
+              Boolean(candidate),
+            )
+            .filter((candidate) =>
+              this.shouldKeepFallbackBoardCandidate(candidate),
+            )
+            .sort((left, right) =>
+              this.compareBoardCandidateEvidence(left, right),
+            );
 
           for (const candidate of pageCandidates) {
             const key = `${candidate.source}:${candidate.boardToken.toLowerCase()}`;
@@ -3304,7 +3714,10 @@ Return strict JSON:
     );
   }
 
-  private interleaveCandidateBoardGroups(groups: CandidateBoardInput[][], limit: number) {
+  private interleaveCandidateBoardGroups(
+    groups: CandidateBoardInput[][],
+    limit: number,
+  ) {
     const queues = groups.map((group) => [...group]);
     const selected: CandidateBoardInput[] = [];
 
@@ -3355,7 +3768,10 @@ Return strict JSON:
     directQueries: string[];
   }) {
     const roleFamilies = input.focusAreas.join(", ");
-    const sourcePrompts: Record<Exclude<ExternalJobSource, "adzuna">, string[]> = {
+    const sourcePrompts: Record<
+      Exclude<ExternalJobSource, "adzuna">,
+      string[]
+    > = {
       greenhouse: [
         `Find real Greenhouse company job board URLs on boards.greenhouse.io or job-boards.greenhouse.io for US companies hiring in ${roleFamilies}.`,
         `Find Greenhouse job posting URLs on job-boards.greenhouse.io with United States or Remote US jobs in software, data, product, QA, cloud, security, and IT roles.`,
@@ -3385,13 +3801,22 @@ Return strict JSON:
         `Find Recruitee /o/ job posting URLs for software, data, product, QA, cloud, security, and IT roles in the US.`,
       ],
     };
-    const sampledDirectQueries = this.sampleSearchQueries(input.directQueries, 8);
+    const sampledDirectQueries = this.sampleSearchQueries(
+      input.directQueries,
+      8,
+    );
     const customQuery = input.customQuery?.trim()
-      ? [`Find ${input.source} job board URLs related to: ${input.customQuery.trim()}`]
+      ? [
+          `Find ${input.source} job board URLs related to: ${input.customQuery.trim()}`,
+        ]
       : [];
 
     return Array.from(
-      new Set([...customQuery, ...sourcePrompts[input.source], ...sampledDirectQueries]),
+      new Set([
+        ...customQuery,
+        ...sourcePrompts[input.source],
+        ...sampledDirectQueries,
+      ]),
     ).slice(0, 12);
   }
 
@@ -3406,7 +3831,10 @@ Return strict JSON:
     const avoidClause = input.avoidTokens.length
       ? `Avoid these already-seen board tokens: ${input.avoidTokens.join(", ")}.`
       : "Avoid duplicates from earlier results.";
-    const sourcePrompts: Record<Exclude<ExternalJobSource, "adzuna">, string[]> = {
+    const sourcePrompts: Record<
+      Exclude<ExternalJobSource, "adzuna">,
+      string[]
+    > = {
       greenhouse: [
         `Backfill more real Greenhouse job board or posting URLs for US technology companies hiring in ${roleFamilies}. ${avoidClause}`,
         `Find additional job-boards.greenhouse.io posting URLs or company boards for US software, data, product, QA, cloud, security, and IT roles. ${avoidClause}`,
@@ -3433,11 +3861,15 @@ Return strict JSON:
       ],
     };
     const customQuery = input.customQuery?.trim()
-      ? [`Backfill ${input.source} ATS URLs related to "${input.customQuery.trim()}". ${avoidClause}`]
+      ? [
+          `Backfill ${input.source} ATS URLs related to "${input.customQuery.trim()}". ${avoidClause}`,
+        ]
       : [];
     const roundPrompt =
       input.round > 1
-        ? [`Find less obvious but still real ${input.source} ATS URLs from mid-market and growth-stage companies. ${avoidClause}`]
+        ? [
+            `Find less obvious but still real ${input.source} ATS URLs from mid-market and growth-stage companies. ${avoidClause}`,
+          ]
         : [];
 
     return Array.from(
@@ -3545,7 +3977,9 @@ Return strict JSON:
         });
       }
 
-      for (const url of this.extractUrlsFromText(this.extractResponseText(response))) {
+      for (const url of this.extractUrlsFromText(
+        this.extractResponseText(response),
+      )) {
         if (!urls.has(url)) {
           urls.set(url, {
             url,
@@ -3593,7 +4027,8 @@ Return strict JSON:
       return outputText;
     }
 
-    const output = (response as { output?: Array<Record<string, unknown>> }).output;
+    const output = (response as { output?: Array<Record<string, unknown>> })
+      .output;
     if (!Array.isArray(output)) {
       return "";
     }
@@ -3629,7 +4064,9 @@ Return strict JSON:
         try {
           return extractBoardsFromText(text, text)
             .filter((candidate) => candidate.source === source)
-            .map((candidate) => this.withBoardEvidence(candidate, "direct_search"));
+            .map((candidate) =>
+              this.withBoardEvidence(candidate, "direct_search"),
+            );
         } catch {
           return [];
         }
@@ -3646,7 +4083,9 @@ Return strict JSON:
           evidenceSource: board.evidenceSource,
         }),
       )
-      .filter((candidate): candidate is CandidateBoardInput => Boolean(candidate));
+      .filter((candidate): candidate is CandidateBoardInput =>
+        Boolean(candidate),
+      );
   }
 
   private extractBoardCandidatesFromSourceUrls(
@@ -3665,7 +4104,9 @@ Return strict JSON:
       try {
         return extractBoardsFromText(evidence.url, evidence.url)
           .filter((candidate) => candidate.source === source)
-          .map((candidate) => this.withBoardEvidence(candidate, evidence.evidenceSource));
+          .map((candidate) =>
+            this.withBoardEvidence(candidate, evidence.evidenceSource),
+          );
       } catch {
         return [];
       }
@@ -3673,17 +4114,26 @@ Return strict JSON:
   }
 
   private withBoardEvidence(
-    candidate: Pick<CandidateBoardInput, "source" | "boardToken" | "evidenceUrl">,
+    candidate: Pick<
+      CandidateBoardInput,
+      "source" | "boardToken" | "evidenceUrl"
+    >,
     evidenceSource: CandidateEvidenceSource,
   ): CandidateBoardInput {
     return {
       ...candidate,
-      evidenceKind: this.classifyBoardEvidence(candidate.source, candidate.evidenceUrl),
+      evidenceKind: this.classifyBoardEvidence(
+        candidate.source,
+        candidate.evidenceUrl,
+      ),
       evidenceSource,
     };
   }
 
-  private classifyBoardEvidence(source: ExternalJobSource, evidenceUrl: string): CandidateEvidenceKind {
+  private classifyBoardEvidence(
+    source: ExternalJobSource,
+    evidenceUrl: string,
+  ): CandidateEvidenceKind {
     try {
       const parsed = new URL(evidenceUrl.replace(/&amp;/g, "&"));
       const hostname = parsed.hostname.replace(/^www\./i, "").toLowerCase();
@@ -3701,7 +4151,9 @@ Return strict JSON:
 
       if (source === "greenhouse") {
         if (hostname === "job-boards.greenhouse.io") {
-          return segments.length > 2 && segments[1] === "jobs" ? "job_posting_url" : "board_root_url";
+          return segments.length > 2 && segments[1] === "jobs"
+            ? "job_posting_url"
+            : "board_root_url";
         }
 
         if (hostname === "boards.greenhouse.io") {
@@ -3720,7 +4172,9 @@ Return strict JSON:
       }
 
       if (source === "workable" && hostname === "apply.workable.com") {
-        return segments.length > 2 || segments[0] === "j" ? "job_posting_url" : "board_root_url";
+        return segments.length > 2 || segments[0] === "j"
+          ? "job_posting_url"
+          : "board_root_url";
       }
 
       if (source === "smartrecruiters") {
@@ -3733,7 +4187,9 @@ Return strict JSON:
       }
 
       if (source === "recruitee" && hostname.endsWith(".recruitee.com")) {
-        return segments[0] === "o" && segments.length > 1 ? "job_posting_url" : "board_root_url";
+        return segments[0] === "o" && segments.length > 1
+          ? "job_posting_url"
+          : "board_root_url";
       }
     } catch {
       return "unknown";
@@ -3743,7 +4199,10 @@ Return strict JSON:
   }
 
   private shouldKeepFallbackBoardCandidate(candidate: CandidateBoardInput) {
-    if (candidate.source === "lever" && candidate.evidenceKind === "board_root_url") {
+    if (
+      candidate.source === "lever" &&
+      candidate.evidenceKind === "board_root_url"
+    ) {
       return false;
     }
 
@@ -3758,8 +4217,14 @@ Return strict JSON:
     return true;
   }
 
-  private compareBoardCandidateEvidence(left: CandidateBoardInput, right: CandidateBoardInput) {
-    return this.boardCandidateEvidenceScore(right) - this.boardCandidateEvidenceScore(left);
+  private compareBoardCandidateEvidence(
+    left: CandidateBoardInput,
+    right: CandidateBoardInput,
+  ) {
+    return (
+      this.boardCandidateEvidenceScore(right) -
+      this.boardCandidateEvidenceScore(left)
+    );
   }
 
   private boardCandidateEvidenceScore(candidate: CandidateBoardInput) {
@@ -3775,12 +4240,16 @@ Return strict JSON:
       openai_text: 0,
     };
 
-    return (kindScore[candidate.evidenceKind ?? "unknown"] * 10) + sourceScore[candidate.evidenceSource ?? "openai_text"];
+    return (
+      kindScore[candidate.evidenceKind ?? "unknown"] * 10 +
+      sourceScore[candidate.evidenceSource ?? "openai_text"]
+    );
   }
 
   private extractWebSearchSourceUrls(response: unknown) {
     const urls = new Set<string>();
-    const output = (response as { output?: Array<Record<string, unknown>> }).output;
+    const output = (response as { output?: Array<Record<string, unknown>> })
+      .output;
 
     if (!Array.isArray(output)) {
       return [];
@@ -3788,7 +4257,9 @@ Return strict JSON:
 
     for (const item of output) {
       if (item.type === "web_search_call") {
-        const action = item.action as { sources?: Array<{ type?: string; url?: string }> } | undefined;
+        const action = item.action as
+          | { sources?: Array<{ type?: string; url?: string }> }
+          | undefined;
         if (Array.isArray(action?.sources)) {
           for (const source of action.sources) {
             if (source?.type === "url" && typeof source.url === "string") {
@@ -3804,13 +4275,18 @@ Return strict JSON:
       }
 
       for (const entry of content) {
-        const annotations = (entry as { annotations?: Array<{ type?: string; url?: string }> }).annotations;
+        const annotations = (
+          entry as { annotations?: Array<{ type?: string; url?: string }> }
+        ).annotations;
         if (!Array.isArray(annotations)) {
           continue;
         }
 
         for (const annotation of annotations) {
-          if (annotation?.type === "url_citation" && typeof annotation.url === "string") {
+          if (
+            annotation?.type === "url_citation" &&
+            typeof annotation.url === "string"
+          ) {
             urls.add(annotation.url);
           }
         }
@@ -3892,17 +4368,26 @@ Return strict JSON:
 
     try {
       const homepage = this.normalizeUrl(company.homepage);
-      const careersUrl = company.careersUrl ? this.normalizeUrl(company.careersUrl) : undefined;
+      const careersUrl = company.careersUrl
+        ? this.normalizeUrl(company.careersUrl)
+        : undefined;
 
       const normalizedSegments = Array.from(
-        new Set([...(company.segments ?? []), ...focusAreas].map((segment) => segment.trim()).filter(Boolean)),
+        new Set(
+          [...(company.segments ?? []), ...focusAreas]
+            .map((segment) => segment.trim())
+            .filter(Boolean),
+        ),
       );
 
       return {
         company: company.company.trim(),
         homepage,
         careersUrl,
-        companyDomain: company.companyDomain?.trim() || this.domainFromUrl(homepage) || undefined,
+        companyDomain:
+          company.companyDomain?.trim() ||
+          this.domainFromUrl(homepage) ||
+          undefined,
         segments: normalizedSegments,
         sourceHint: undefined,
         confidence:
@@ -3914,20 +4399,27 @@ Return strict JSON:
                 ? 0.82
                 : 0.74,
         origin: `web_search:${tier}`,
-        notes: company.notes ?? `Auto-sourced via web search for ${tier} companies.`,
+        notes:
+          company.notes ?? `Auto-sourced via web search for ${tier} companies.`,
       };
     } catch {
       return null;
     }
   }
 
-  private normalizeBoardCandidate(candidate: CandidateBoardInput): CandidateBoardInput | null {
+  private normalizeBoardCandidate(
+    candidate: CandidateBoardInput,
+  ): CandidateBoardInput | null {
     const normalizedToken = candidate.boardToken.trim();
     if (!normalizedToken) {
       return null;
     }
 
-    const evidenceUrl = this.canonicalBoardUrl(candidate.source, normalizedToken, candidate.evidenceUrl);
+    const evidenceUrl = this.canonicalBoardUrl(
+      candidate.source,
+      normalizedToken,
+      candidate.evidenceUrl,
+    );
     if (!evidenceUrl) {
       return null;
     }
@@ -3936,7 +4428,9 @@ Return strict JSON:
       source: candidate.source,
       boardToken: normalizedToken,
       evidenceUrl,
-      evidenceKind: candidate.evidenceKind ?? this.classifyBoardEvidence(candidate.source, candidate.evidenceUrl),
+      evidenceKind:
+        candidate.evidenceKind ??
+        this.classifyBoardEvidence(candidate.source, candidate.evidenceUrl),
       evidenceSource: candidate.evidenceSource,
     };
   }
@@ -3946,7 +4440,10 @@ Return strict JSON:
     boardToken: string,
     evidenceUrl?: string,
   ) {
-    const fallbackBySource: Record<Exclude<ExternalJobSource, "adzuna">, string> = {
+    const fallbackBySource: Record<
+      Exclude<ExternalJobSource, "adzuna">,
+      string
+    > = {
       greenhouse: `https://job-boards.greenhouse.io/${boardToken}`,
       lever: `https://jobs.lever.co/${boardToken}`,
       ashby: `https://jobs.ashbyhq.com/${boardToken}`,
@@ -3962,12 +4459,14 @@ Return strict JSON:
 
         if (
           (source === "greenhouse" &&
-            (hostname === "job-boards.greenhouse.io" || hostname === "boards.greenhouse.io")) ||
+            (hostname === "job-boards.greenhouse.io" ||
+              hostname === "boards.greenhouse.io")) ||
           (source === "lever" && hostname === "jobs.lever.co") ||
           (source === "ashby" && hostname === "jobs.ashbyhq.com") ||
           (source === "workable" && hostname === "apply.workable.com") ||
           (source === "smartrecruiters" &&
-            (hostname === "careers.smartrecruiters.com" || hostname === "jobs.smartrecruiters.com")) ||
+            (hostname === "careers.smartrecruiters.com" ||
+              hostname === "jobs.smartrecruiters.com")) ||
           (source === "recruitee" && hostname.endsWith(".recruitee.com"))
         ) {
           return source === "recruitee"
@@ -3983,7 +4482,9 @@ Return strict JSON:
   }
 
   private async filterNewBoardCandidates(candidates: CandidateBoardInput[]) {
-    const rejectedAfter = new Date(Date.now() - BOARD_REJECTION_COOLDOWN_DAYS * 24 * 60 * 60 * 1000);
+    const rejectedAfter = new Date(
+      Date.now() - BOARD_REJECTION_COOLDOWN_DAYS * 24 * 60 * 60 * 1000,
+    );
     const [existingCandidateBoards, existingSourceBoards] = await Promise.all([
       (this.prisma as any).candidateBoard.findMany({
         where: {
@@ -4017,12 +4518,16 @@ Return strict JSON:
       }),
     ]);
 
-    const knownBoards = new Set<string>(
-      [
-        ...existingCandidateBoards.map((board: { sourceName: string; boardToken: string }) => `${board.sourceName}:${board.boardToken}`),
-        ...existingSourceBoards.map((board: { sourceName: string; boardToken: string }) => `${board.sourceName}:${board.boardToken}`),
-      ],
-    );
+    const knownBoards = new Set<string>([
+      ...existingCandidateBoards.map(
+        (board: { sourceName: string; boardToken: string }) =>
+          `${board.sourceName}:${board.boardToken}`,
+      ),
+      ...existingSourceBoards.map(
+        (board: { sourceName: string; boardToken: string }) =>
+          `${board.sourceName}:${board.boardToken}`,
+      ),
+    ]);
     const seenBoards = new Set<string>();
 
     const kept: CandidateBoardInput[] = [];
@@ -4042,7 +4547,10 @@ Return strict JSON:
     return { kept, skipped };
   }
 
-  private async validateBoardCandidates(candidates: CandidateBoardInput[], targetValidatedCount?: number) {
+  private async validateBoardCandidates(
+    candidates: CandidateBoardInput[],
+    targetValidatedCount?: number,
+  ) {
     const createdCompanies: Array<Record<string, unknown>> = [];
     const createdBoards: Array<Record<string, unknown>> = [];
     const failedValidations: Array<{
@@ -4058,7 +4566,10 @@ Return strict JSON:
         const jobs = await adapter.fetchJobs(candidate.boardToken);
         const usJobs = jobs.filter((job) => isUsRelevantJob(job));
         if (!jobs.length) {
-          await this.persistRejectedBoardCandidate(candidate, "validated but returned no jobs");
+          await this.persistRejectedBoardCandidate(
+            candidate,
+            "validated but returned no jobs",
+          );
           failedValidations.push({
             source: candidate.source,
             boardToken: candidate.boardToken,
@@ -4069,7 +4580,10 @@ Return strict JSON:
         }
 
         if (!usJobs.length) {
-          await this.persistRejectedBoardCandidate(candidate, "validated but returned no US jobs");
+          await this.persistRejectedBoardCandidate(
+            candidate,
+            "validated but returned no US jobs",
+          );
           failedValidations.push({
             source: candidate.source,
             boardToken: candidate.boardToken,
@@ -4081,7 +4595,10 @@ Return strict JSON:
 
         const firstJob = usJobs[0] ?? jobs[0];
         if (!firstJob) {
-          await this.persistRejectedBoardCandidate(candidate, "no jobs available after validation");
+          await this.persistRejectedBoardCandidate(
+            candidate,
+            "no jobs available after validation",
+          );
           failedValidations.push({
             source: candidate.source,
             boardToken: candidate.boardToken,
@@ -4093,7 +4610,10 @@ Return strict JSON:
 
         const companyName = firstJob.company?.trim();
         if (!companyName) {
-          await this.persistRejectedBoardCandidate(candidate, "could not derive company name from jobs payload");
+          await this.persistRejectedBoardCandidate(
+            candidate,
+            "could not derive company name from jobs payload",
+          );
           failedValidations.push({
             source: candidate.source,
             boardToken: candidate.boardToken,
@@ -4107,40 +4627,45 @@ Return strict JSON:
           this.companyDomain(firstJob.companyLogoUrl) ??
           this.publicCompanyDomainFromUrl(firstJob.applyUrl) ??
           undefined;
-        const homepage = companyDomain ? `https://${companyDomain}` : candidate.evidenceUrl;
+        const homepage = companyDomain
+          ? `https://${companyDomain}`
+          : candidate.evidenceUrl;
 
-        const candidateCompany = await this.findOrCreateCandidateCompanyFromBoard({
-          company: companyName,
-          homepage,
-          companyDomain,
-          source: candidate.source,
-          boardToken: candidate.boardToken,
-          evidenceUrl: candidate.evidenceUrl,
-        });
-
-        const candidateBoard = await (this.prisma as any).candidateBoard.upsert({
-          where: {
-            sourceName_boardToken_candidateCompanyId: {
-              sourceName: candidate.source,
-              boardToken: candidate.boardToken,
-              candidateCompanyId: candidateCompany.id,
-            },
-          },
-          create: {
-            candidateCompanyId: candidateCompany.id,
-            sourceName: candidate.source,
+        const candidateCompany =
+          await this.findOrCreateCandidateCompanyFromBoard({
+            company: companyName,
+            homepage,
+            companyDomain,
+            source: candidate.source,
             boardToken: candidate.boardToken,
             evidenceUrl: candidate.evidenceUrl,
-            status: "validated",
-            validatedAt: new Date(),
+          });
+
+        const candidateBoard = await (this.prisma as any).candidateBoard.upsert(
+          {
+            where: {
+              sourceName_boardToken_candidateCompanyId: {
+                sourceName: candidate.source,
+                boardToken: candidate.boardToken,
+                candidateCompanyId: candidateCompany.id,
+              },
+            },
+            create: {
+              candidateCompanyId: candidateCompany.id,
+              sourceName: candidate.source,
+              boardToken: candidate.boardToken,
+              evidenceUrl: candidate.evidenceUrl,
+              status: "validated",
+              validatedAt: new Date(),
+            },
+            update: {
+              evidenceUrl: candidate.evidenceUrl,
+              status: "validated",
+              validationError: null,
+              validatedAt: new Date(),
+            },
           },
-          update: {
-            evidenceUrl: candidate.evidenceUrl,
-            status: "validated",
-            validationError: null,
-            validatedAt: new Date(),
-          },
-        });
+        );
 
         await (this.prisma as any).candidateCompany.update({
           where: { id: candidateCompany.id },
@@ -4154,11 +4679,15 @@ Return strict JSON:
         createdCompanies.push(candidateCompany);
         createdBoards.push(candidateBoard);
 
-        if (targetValidatedCount && createdBoards.length >= targetValidatedCount) {
+        if (
+          targetValidatedCount &&
+          createdBoards.length >= targetValidatedCount
+        ) {
           break;
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : "unknown validation error";
+        const reason =
+          error instanceof Error ? error.message : "unknown validation error";
         await this.persistRejectedBoardCandidate(candidate, reason);
         failedValidations.push({
           source: candidate.source,
@@ -4191,7 +4720,9 @@ Return strict JSON:
       this.publicCompanyDomainFromUrl(normalizedHomepage) ??
       null;
 
-    const existingCandidates = await (this.prisma as any).candidateCompany.findMany({
+    const existingCandidates = await (
+      this.prisma as any
+    ).candidateCompany.findMany({
       where: {
         OR: [
           { homepage: normalizedHomepage },
@@ -4209,7 +4740,8 @@ Return strict JSON:
 
     const existingByHomepage = existingCandidates.find(
       (candidate: { homepage?: string | null }) =>
-        candidate.homepage && this.normalizeUrl(candidate.homepage) === normalizedHomepage,
+        candidate.homepage &&
+        this.normalizeUrl(candidate.homepage) === normalizedHomepage,
     );
 
     const existing = existingByName ?? existingByHomepage ?? null;
@@ -4223,7 +4755,9 @@ Return strict JSON:
           companyDomain: normalizedDomain,
           careersUrl: existing.careersUrl ?? input.evidenceUrl,
           origin: existing.origin ?? "board_first_search",
-          notes: existing.notes ?? `Derived from ${input.source} board ${input.boardToken}`,
+          notes:
+            existing.notes ??
+            `Derived from ${input.source} board ${input.boardToken}`,
         },
       });
     }
@@ -4242,11 +4776,15 @@ Return strict JSON:
     });
   }
 
-  private async persistRejectedBoardCandidate(candidate: CandidateBoardInput, reason: string) {
+  private async persistRejectedBoardCandidate(
+    candidate: CandidateBoardInput,
+    reason: string,
+  ) {
     const candidateCompany = await this.findOrCreateCandidateCompanyFromBoard({
       company: formatBoardToken(candidate.boardToken),
       homepage: candidate.evidenceUrl,
-      companyDomain: this.publicCompanyDomainFromUrl(candidate.evidenceUrl) ?? undefined,
+      companyDomain:
+        this.publicCompanyDomainFromUrl(candidate.evidenceUrl) ?? undefined,
       source: candidate.source,
       boardToken: candidate.boardToken,
       evidenceUrl: candidate.evidenceUrl,
@@ -4372,7 +4910,9 @@ Return strict JSON:
       const normalizedName = this.normalizeCompanyName(company.company);
       const normalizedHomepage = this.normalizeUrl(company.homepage);
       const normalizedDomain =
-        company.companyDomain?.trim().toLowerCase() ?? this.domainFromUrl(normalizedHomepage) ?? undefined;
+        company.companyDomain?.trim().toLowerCase() ??
+        this.domainFromUrl(normalizedHomepage) ??
+        undefined;
 
       if (
         seenNames.has(normalizedName) ||
@@ -4409,12 +4949,17 @@ Return strict JSON:
       .trim();
   }
 
-  private incrementCount(map: Map<string, number>, key: string | null | undefined) {
+  private incrementCount(
+    map: Map<string, number>,
+    key: string | null | undefined,
+  ) {
     const normalized = key?.trim() || "Unknown";
     map.set(normalized, (map.get(normalized) ?? 0) + 1);
   }
 
-  private orderedBucketRows<TBucket extends string>(buckets: Record<TBucket, number>) {
+  private orderedBucketRows<TBucket extends string>(
+    buckets: Record<TBucket, number>,
+  ) {
     return Object.entries(buckets).map(([label, count]) => ({
       label,
       count: count as number,
@@ -4424,7 +4969,10 @@ Return strict JSON:
   private countMapToRows(map: Map<string, number>) {
     return Array.from(map.entries())
       .map(([label, count]) => ({ label, count }))
-      .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+      .sort(
+        (left, right) =>
+          right.count - left.count || left.label.localeCompare(right.label),
+      );
   }
 
   private classifyPostedAgeBucket(postedAt: Date, now: Date) {
@@ -4456,74 +5004,160 @@ Return strict JSON:
   private classifyJobCategory(title: string) {
     const normalized = title.toLowerCase();
 
-    if (/\b(machine learning|ml engineer|ai engineer|artificial intelligence|llm|nlp|computer vision)\b/.test(normalized)) {
+    if (
+      /\b(machine learning|ml engineer|ai engineer|artificial intelligence|llm|nlp|computer vision)\b/.test(
+        normalized,
+      )
+    ) {
       return "AI / ML";
     }
-    if (/\b(data engineer|data scientist|analytics engineer|business intelligence|bi\b|data analyst|analytics|etl|warehouse)\b/.test(normalized)) {
+    if (
+      /\b(data engineer|data scientist|analytics engineer|business intelligence|bi\b|data analyst|analytics|etl|warehouse)\b/.test(
+        normalized,
+      )
+    ) {
       return "Data";
     }
-    if (/\b(product manager|product owner|group product|principal product|technical product)\b/.test(normalized)) {
+    if (
+      /\b(product manager|product owner|group product|principal product|technical product)\b/.test(
+        normalized,
+      )
+    ) {
       return "Product";
     }
-    if (/\b(qa|quality assurance|sdet|test automation|software development engineer in test)\b/.test(normalized)) {
+    if (
+      /\b(qa|quality assurance|sdet|test automation|software development engineer in test)\b/.test(
+        normalized,
+      )
+    ) {
       return "QA / Test";
     }
-    if (/\b(security|cybersecurity|appsec|application security|trust and safety|iam|identity)\b/.test(normalized)) {
+    if (
+      /\b(security|cybersecurity|appsec|application security|trust and safety|iam|identity)\b/.test(
+        normalized,
+      )
+    ) {
       return "Security";
     }
-    if (/\b(devops|sre|site reliability|cloud|infrastructure|platform engineer|systems engineer|kubernetes)\b/.test(normalized)) {
+    if (
+      /\b(devops|sre|site reliability|cloud|infrastructure|platform engineer|systems engineer|kubernetes)\b/.test(
+        normalized,
+      )
+    ) {
       return "Cloud / Infrastructure";
     }
     if (/\b(ux|ui|product design|designer|researcher)\b/.test(normalized)) {
       return "Design";
     }
-    if (/\b(salesforce|servicenow|erp|crm|business systems|netsuite|workday analyst|systems analyst)\b/.test(normalized)) {
+    if (
+      /\b(salesforce|servicenow|erp|crm|business systems|netsuite|workday analyst|systems analyst)\b/.test(
+        normalized,
+      )
+    ) {
       return "Business Systems";
     }
-    if (/\b(it support|help desk|desktop support|technical support|support engineer|support specialist)\b/.test(normalized)) {
+    if (
+      /\b(it support|help desk|desktop support|technical support|support engineer|support specialist)\b/.test(
+        normalized,
+      )
+    ) {
       return "IT / Support";
     }
-    if (/\b(program manager|project manager|scrum master|delivery manager|tpm|technical program)\b/.test(normalized)) {
+    if (
+      /\b(program manager|project manager|scrum master|delivery manager|tpm|technical program)\b/.test(
+        normalized,
+      )
+    ) {
       return "Program / Delivery";
     }
-    if (/\b(software|engineer|developer|frontend|front end|backend|back end|full stack|mobile|ios|android)\b/.test(normalized)) {
+    if (
+      /\b(software|engineer|developer|frontend|front end|backend|back end|full stack|mobile|ios|android)\b/.test(
+        normalized,
+      )
+    ) {
       return "Software Engineering";
     }
 
     return "Other";
   }
 
-  private classifyWorkMode(remoteType?: string | null, location?: string | null) {
+  private classifyWorkMode(
+    remoteType?: string | null,
+    location?: string | null,
+  ) {
     const combined = `${remoteType ?? ""} ${location ?? ""}`.toLowerCase();
 
     if (/\b(remote|work from home|wfh)\b/.test(combined)) return "Remote";
     if (/\bhybrid\b/.test(combined)) return "Hybrid";
-    if (/\bonsite|on-site|office\b/.test(combined)) return "Onsite";
+    if (/\bonsite|on-site|on site|office\b/.test(combined)) return "On-site";
     return "Unknown";
   }
 
-  private classifyRegistryLocation(location?: string | null, remoteType?: string | null) {
+  private classifyRegistryLocation(
+    location?: string | null,
+    remoteType?: string | null,
+  ) {
     const combined = `${location ?? ""} ${remoteType ?? ""}`.toLowerCase();
 
     if (!combined.trim()) return "Unknown";
-    if (combined.includes("remote") && /\b(us|usa|united states|u\.s\.|north america)\b/.test(combined)) {
-      return "Remote US / North America";
-    }
-    if (/\b(united states|usa|u\.s\.| us |new york|san francisco|california|texas|florida|washington|chicago|boston|austin|seattle|denver|atlanta|remote, us)\b/.test(` ${combined} `)) {
-      return "US";
-    }
-    if (/\bcanada|north america\b/.test(combined)) {
+    if (this.hasRemoteSignal(combined) && this.hasUsSignal(combined))
+      return "Remote US";
+    if (this.hasUsSignal(combined)) return "US";
+    if (/\bnorth america\b/.test(combined)) {
       return "North America";
     }
-    if (combined.includes("remote")) return "Remote, location unclear";
+    if (this.hasRemoteSignal(combined)) return "Remote, unclear country";
+    if (this.hasNonUsSignal(combined)) return "Non-US";
     return "Other / Global";
+  }
+
+  private classifyCountryScope(
+    location?: string | null,
+    remoteType?: string | null,
+  ) {
+    const combined = `${location ?? ""} ${remoteType ?? ""}`.toLowerCase();
+
+    if (!combined.trim()) return "Unknown";
+    if (this.hasRemoteSignal(combined) && this.hasUsSignal(combined))
+      return "Remote US";
+    if (this.hasUsSignal(combined)) return "US";
+    if (/\bnorth america\b/.test(combined)) return "North America";
+    if (/\bglobal|worldwide|anywhere\b/.test(combined)) return "Global";
+    if (this.hasNonUsSignal(combined)) return "Non-US";
+    if (this.hasRemoteSignal(combined)) return "Remote, unclear country";
+    return "Unknown";
+  }
+
+  private hasRemoteSignal(value: string) {
+    return /\b(remote|work from home|wfh|anywhere)\b/.test(value);
+  }
+
+  private hasUsSignal(value: string) {
+    return (
+      /\b(united states|usa|u\.s\.|u\.s\.a\.| us |us-only|us only|us-based|us based|remote[-\s]*(?:us|usa))\b/.test(
+        ` ${value} `,
+      ) ||
+      /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|district of columbia|san francisco|chicago|boston|austin|seattle|denver|atlanta|los angeles|durham)\b/.test(
+        value,
+      ) ||
+      /\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b/.test(
+        value.toUpperCase(),
+      )
+    );
+  }
+
+  private hasNonUsSignal(value: string) {
+    return /\b(argentina|australia|brazil|canada|france|germany|india|ireland|israel|italy|japan|malaysia|mexico|netherlands|poland|romania|singapore|spain|sweden|switzerland|united kingdom|uk|europe|eu|apac|emea|london|paris|berlin|toronto|vancouver|montreal|sydney|melbourne|bengaluru|bangalore|hyderabad|pune|mumbai|chennai|villeneuve|fr)\b/.test(
+      value,
+    );
   }
 
   private targetCompanyDomain(company: string) {
     const normalized = company.trim().toLowerCase();
     return (
-      getTargetCompanies().find((candidate) => candidate.company.trim().toLowerCase() === normalized)
-        ?.domain ?? null
+      getTargetCompanies().find(
+        (candidate) => candidate.company.trim().toLowerCase() === normalized,
+      )?.domain ?? null
     );
   }
 
@@ -4553,7 +5187,9 @@ Return strict JSON:
       const key = `${source}:${boardToken}`;
       const current = grouped.get(key) ?? [];
       const resolvedDomain =
-        job.companyDomain ?? boardDomains.get(key) ?? this.targetCompanyDomain(job.company);
+        job.companyDomain ??
+        boardDomains.get(key) ??
+        this.targetCompanyDomain(job.company);
 
       current.push({
         id: job.sourceKey,
@@ -4561,7 +5197,8 @@ Return strict JSON:
         boardToken,
         title: job.title,
         company: job.company,
-        companyLogoUrl: job.companyLogoUrl ?? this.logoUrlForDomain(resolvedDomain),
+        companyLogoUrl:
+          job.companyLogoUrl ?? this.logoUrlForDomain(resolvedDomain),
         location: job.location,
         workMode: job.remoteType,
         employmentType: job.employmentType,
@@ -4611,7 +5248,8 @@ Return strict JSON:
         boardToken,
         title: job.title,
         company: job.company,
-        companyLogoUrl: job.companyLogoUrl ?? this.logoUrlForDomain(resolvedDomain),
+        companyLogoUrl:
+          job.companyLogoUrl ?? this.logoUrlForDomain(resolvedDomain),
         location: job.location,
         workMode: job.remoteType,
         employmentType: job.employmentType,
@@ -4638,7 +5276,9 @@ Return strict JSON:
     if (!cursor) return null;
 
     try {
-      const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as {
+      const parsed = JSON.parse(
+        Buffer.from(cursor, "base64url").toString("utf8"),
+      ) as {
         updatedAt?: string;
         sourceKey?: string;
       };

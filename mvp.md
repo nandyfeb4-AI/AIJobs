@@ -1,292 +1,412 @@
 # MVP Definition
+
 **Document type:** Minimum Viable Product Scope  
-**Last updated:** April 22, 2026  
-**Status:** Draft v1.0  
-**Reference:** See vision.md for full product context
+**Last updated:** 2026-05-01  
+**Status:** Draft v2.0  
+**Reference:** See `vision.md`, `source-strategy.md`, `AGENTS.md`, and `research/ats-source-prioritization.md`
 
 ---
 
 ## MVP Goal
 
-Prove that users who go through our full loop — profile extraction → job matching → ATS checking and resume tailoring → application tracking — get a meaningfully higher interview rate than the industry average.
+Prove that US-based immigrants and high-urgency job seekers can use AIJobs to find relevant jobs faster, tailor stronger applications, apply with less friction, and track outcomes in one place.
 
-The MVP is not about scale. It is about proving the core loop works and that users find it valuable enough to come back and recommend it.
-
-**MVP success condition:** 100 active users complete the full loop. Average interview rate ≥ 25%. At least 40% return within 7 days without prompting.
-
----
-
-## The Core Loop (Non-Negotiable)
-
-Everything in the MVP exists to close this loop:
+The MVP is not just a job board and not just a resume tool. The value is the full loop:
 
 ```
-1. User onboards → profile extracted
-          ↓
-2. AI matches user to relevant jobs
-          ↓
-3. User selects a match → resume checked, edited, and auto-tailored
-          ↓
-4. User reviews & applies individually or in a quality-gated batch
-          ↓
-5. Tracker auto-updates (via Gmail sync)
-          ↓
-6. Outcome recorded → feeds back into matching
+profile -> relevant fresh jobs -> tailored resume -> apply/autofill -> tracker -> outcome learning
 ```
 
-If a feature does not serve one of these six steps, it is not in the MVP.
+## MVP Success Criteria
+
+The MVP is successful when:
+
+- 100 active users complete the full application loop.
+- Users receive relevant daily job recommendations from a trusted inventory.
+- Average interview rate is meaningfully above baseline, target >= 20%, stretch >= 25%.
+- At least 40% of users return within 7 days.
+- Users can apply to jobs with less manual effort than existing job boards.
+
+## Inventory Goal
+
+For MVP launch readiness, target `100k-150k` relevant jobs.
+
+This does not mean any 100k jobs. The inventory must be:
+
+- US or Remote-US
+- fresh enough to apply to
+- relevant to tech and business-tech roles
+- deduped across sources
+- categorized well enough to filter and match
+- connected to a usable apply URL
+
+Inventory quality is part of the MVP. A large stale database is not success.
+
+## Target User
+
+Primary launch audience:
+
+- immigrants already in the US
+- candidates with work urgency
+- H-1B, H-4 EAD, L-2 EAD/L-2S, F-1 OPT/STEM OPT, GC, citizens, and similar work-authorized candidates
+- tech and IT-adjacent professionals who need more application throughput and better targeting
+
+The product should eventually support visa-friendliness signals, but MVP should first make the job inventory, matching, application flow, and tracker work.
+
+## Target Role Scope
+
+Do not overfit only to `software engineer`, `product manager`, and `data engineer`.
+
+MVP role inventory should cover:
+
+- software engineering
+- data engineering
+- data science
+- analytics
+- product management
+- product design
+- UX/UI
+- QA
+- DevOps
+- cloud infrastructure
+- security
+- IT support
+- business systems
+- solutions engineering
+- implementation
+- technical customer success
+- adjacent business-tech roles
+
+## Non-Negotiable Core Loop
+
+Everything in the MVP should support this loop:
+
+1. User creates a profile.
+2. System recommends relevant jobs.
+3. User selects a job.
+4. System checks fit and resume gaps.
+5. User tailors resume.
+6. User applies manually or with autofill help.
+7. Application is tracked.
+8. Outcomes improve matching and prioritization.
+
+If a feature does not support this loop, it belongs after MVP.
 
 ---
 
-## MVP Features (In Scope)
+## MVP Pillars
 
-### 1. Onboarding & Profile Extraction
+### 1. Job Inventory and Source Health
 
-**What it does:** Extracts the user's professional profile from their CV/resume upload and/or LinkedIn URL. Structures their skills, experience, role preferences, location, salary expectations, and work style.
+**What it does:** Maintains a large enough pool of fresh, US/Remote-US, target-role jobs from direct ATS sources, selected feeds, and possibly a paid aggregator bridge.
 
-**Why it matters:** This is the foundation of matching quality. The richer the profile, the better the matches.
+**Why it matters:** Matching and alerts are only valuable if the underlying jobs are fresh, real, and relevant.
 
-**Specifics:**
-- Upload resume (PDF or DOCX) → AI parses and structures it
-- Optional: paste LinkedIn URL for supplementary extraction
-- Short follow-up questions for things the resume can't tell us: target roles, preferred industries, must-have/nice-to-have filters, salary floor, remote/hybrid/on-site preference
-- Profile review screen where user can correct or supplement AI-extracted data
-- Profile completeness indicator (nudges users to fill gaps that affect match quality)
+**In scope:**
 
-**Out of scope for MVP:** Video profile, skills assessments, personality/work style quizzes.
+- Direct ATS ingestion for existing sources:
+  - Greenhouse
+  - Lever
+  - Ashby
+  - SmartRecruiters
+  - Recruitee
+- Continue SmartRecruiters expansion because it is currently producing useful job volume.
+- Pause Workable bulk sourcing unless rate-limit/yield issues are solved.
+- Add source health analytics:
+  - total jobs
+  - jobs added per sync
+  - source distribution
+  - freshness buckets
+  - role category distribution
+  - location/country scope distribution
+  - unknown/other counts
+- Deduplicate jobs across all sources.
+- Track `firstSeenAt`, `lastSeenAt`, `postedAt`, and source metadata where possible.
+
+**Next source work:**
+
+1. JSON-LD `JobPosting` universal crawler.
+2. Public-feed ATS bundle:
+   - JazzHR
+   - BambooHR
+   - Pinpoint
+   - JobScore
+   - Breezy
+   - Teamtailor
+3. Evaluate one commercial bridge such as JSearch/RapidAPI or Fantastic.jobs for temporary volume.
+4. Start design/research for enterprise connectors:
+   - Workday CXS
+   - iCIMS
+   - SuccessFactors
+   - Oracle Cloud HCM/Taleo
+
+**Out of scope for MVP:**
+
+- LinkedIn or Indeed direct crawling.
+- Trying to support every ATS from Teal.
+- Counting non-US or stale jobs as inventory wins.
+- Fully automated web scraping of fragile career pages without source health monitoring.
+
+### 2. Profile and Preference Capture
+
+**What it does:** Builds a structured job-search profile from resume upload and onboarding questions.
+
+**Why it matters:** Matching quality depends on understanding the user, not just the job.
+
+**In scope:**
+
+- Resume upload and parsing.
+- Profile review/edit screen.
+- Target roles.
+- Work authorization and sponsorship preferences.
+- Location and remote/hybrid/on-site preference.
+- Seniority.
+- Skills.
+- Experience summary.
+- Equal employment / voluntary demographic details only where the user explicitly provides them for autofill.
+
+**Out of scope for MVP:**
+
+- Video profile.
+- Personality tests.
+- Deep skills assessments.
+
+### 3. Job Matching Feed
+
+**What it does:** Shows users a focused list of jobs that match their profile, preferences, and urgency.
+
+**Why it matters:** Users do not need another place to browse thousands of jobs. They need a high-confidence shortlist.
+
+**In scope:**
+
+- Daily recommended jobs.
+- Match score and plain-language match reason.
+- Filters for role, location, remote mode, seniority, freshness, and source.
+- Save, skip, and apply actions.
+- Freshness filter:
+  - past 24 hours
+  - past 3 days
+  - past week
+  - past month
+- Early-applicant signal where source data supports it.
+
+**Out of scope for MVP:**
+
+- Perfect company ranking.
+- Full ghost-job detection.
+- Social/networking intelligence.
+
+### 4. Resume Checker and Tailoring
+
+**What it does:** Checks the user's resume against a selected job and generates a tailored version the user can review.
+
+**Why it matters:** This is one of the main conversion levers. A tailored resume should improve response rate more than generic mass apply.
+
+**In scope:**
+
+- ATS-style resume score.
+- Gap analysis against job description.
+- Keyword and skills alignment.
+- Tailored resume generation.
+- Diff view explaining what changed.
+- Editable tailored resume.
+- Download/export.
+- Store a tailored resume per job/application.
+
+**Out of scope for MVP:**
+
+- Cover letter generation.
+- LinkedIn profile rewriting.
+- Fully autonomous resume changes without review.
+
+### 5. Chrome Extension Autofill
+
+**What it does:** Helps the user apply on external ATS/company job forms by filling known profile details.
+
+**Why it matters:** Autofill is the main lever for reducing application friction. This can become a major differentiator even before full auto-apply.
+
+**In scope:**
+
+- Chrome extension local/dev install.
+- User profile fields available to extension.
+- Autofill for common form inputs:
+  - name
+  - email
+  - phone
+  - address
+  - LinkedIn
+  - resume upload where technically feasible
+  - work authorization questions
+  - sponsorship questions
+  - voluntary equal employment fields when user opts in
+- Add job to portal from current job page.
+- ATS-specific mapping where needed, but with a generic fallback for direct career sites.
+
+**Out of scope for MVP:**
+
+- Full hands-free auto-submit.
+- Automated CAPTCHA bypass.
+- Cover letter generation inside extension.
+- Complex multi-page application automation without user review.
+
+### 6. Application Tracker
+
+**What it does:** Tracks every saved/applied job and helps the user understand their pipeline.
+
+**Why it matters:** Users lose track when applying across many ATS systems. The tracker makes the workflow sticky and measurable.
+
+**In scope:**
+
+- Saved -> Applied -> Screening -> Interview -> Offer -> Rejected stages.
+- Manual add/edit.
+- Auto-create application when applying through AIJobs.
+- Notes.
+- Resume version associated with each application.
+- Basic source/outcome metrics.
+
+**Out of scope for MVP:**
+
+- Full CRM-style networking tracker.
+- Recruiter relationship graph.
+
+### 7. Gmail Sync
+
+**What it does:** Reads job-search emails to update application status and detect responses.
+
+**Why it matters:** Manual trackers fail because users do not update them. Gmail sync can make the tracker automatic enough to be useful.
+
+**In scope:**
+
+- Google OAuth with read-only Gmail scope.
+- Detect:
+  - application confirmations
+  - recruiter replies
+  - interview invites
+  - rejection emails
+- Update tracker where a match can be found.
+- User-visible privacy controls.
+
+**Out of scope for MVP:**
+
+- Email composition.
+- Full inbox UI.
+- Outlook/Microsoft sync.
+
+### 8. User Analytics
+
+**What it does:** Shows the user whether their job search is improving.
+
+**Why it matters:** Outcome visibility is the proof that AIJobs works.
+
+**In scope:**
+
+- Applications sent.
+- Response rate.
+- Interview rate.
+- Applications by stage.
+- Source performance.
+- Match score vs. outcome.
+- Resume score trend.
+
+**Out of scope for MVP:**
+
+- Cohort analytics.
+- Team dashboards.
+- Export-heavy reporting.
 
 ---
 
-### 2. AI Job Matching Feed
+## Internal Admin / Supply Analytics
 
-**What it does:** Shows the user a curated daily shortlist of 8–15 job matches based on their profile. Each match includes a score and plain-language explanation of why it was suggested.
+This is not user-facing MVP polish, but it is required to operate the product.
 
-**Why it matters:** This is the core value delivery — the moment users see "these are your jobs" instead of browsing 10,000 listings.
+Admin/source analytics should show:
 
-**Specifics:**
-- Aggregate jobs from at least 3 major sources (LinkedIn, Indeed, and one specialist board for target verticals)
-- Deduplicate and normalise listings into a consistent format
-- Semantic matching engine: goes beyond keyword matching to understand role context, seniority fit, skills adjacency
-- Each job card shows: title, company, location, salary range (if listed), remote/hybrid/on-site, match score (%), match reason ("Matched on: React, API design, startup experience")
-- User can save, skip, apply individually, or add jobs to a batch-apply queue
-- Daily email digest of new top matches (simple, not spammy)
-- Preference filters: role type, location, salary range, company size, remote preference
+- total active jobs
+- total active boards/sources
+- jobs added per sync
+- sync freshness by board/source
+- posted-date freshness buckets
+- location scope distribution
+- role category distribution
+- source distribution
+- top companies by active jobs
+- duplicate counts
+- unknown/other classification counts
 
-**Out of scope for MVP:** Real-time job alerts, mobile push notifications, ghost job detection, company credibility scoring.
-
----
-
-### 3. Per-Role Resume Tailoring
-
-**What it does:** When a user selects a job to apply to, the AI checks their resume against the role, generates a tailored version optimised for that specific role and its ATS expectations, and lets the user edit before submission.
-
-**Why it matters:** One generic resume sent to 50 jobs converts worse than 10 tailored resumes. This is the output quality differentiator.
-
-**Specifics:**
-- One-click tailoring from any job card in the feed
-- Built-in ATS checker on the user's base resume and each tailored version
-- AI rewrites bullet points to incorporate role-relevant keywords naturally (no keyword stuffing)
-- Diff view: shows exactly what changed vs. the user's base resume and why ("Added 'cross-functional stakeholder management' — appears 3 times in job description")
-- ATS score shown before and after tailoring (0–100, with breakdown: keywords, formatting, action verbs, quantified impact)
-- In-product resume editor with role-aware suggestions before downloading/applying
-- Multiple tailored versions stored — one per job applied to
-- PDF download of tailored resume
-
-**Out of scope for MVP:** Cover letter generation (Phase 2), ATS system detection by employer ATS vendor (Phase 2), LinkedIn profile tailoring.
+Any ingestion change that increases volume should be judged against these metrics.
 
 ---
 
-### 4. Quality-Gated Apply Flow
+## Current Next Steps
 
-**What it does:** Lets users choose how to execute applications: one by one for higher control, or in a guided batch for higher speed.
+The current next work should be:
 
-**Why it matters:** Some users want precision, some need throughput. The product should support both without falling into low-quality automation.
+1. **Tighten data quality and analytics**
+   Add/verify `countryScope`, `locationType`, `roleCategory`, freshness buckets, and unknown/other counts.
 
-**Specifics:**
-- Two modes: `Review each` and `Batch apply qualified jobs`
-- Batch apply is only available for jobs above a configurable match threshold and minimum ATS score
-- User selects which resume version or tailoring strategy to use for the batch
-- Before submission, user sees a queue summary with match score, ATS score, and missing requirements
-- Every batch-applied job still creates its own tracker record and stored resume version
-- Outcome analytics compare individually reviewed applications vs. batch-applied applications
+2. **Continue SmartRecruiters expansion**
+   Use exclusion-aware research batches and validate through the app.
 
-**Out of scope for MVP:** Fully hands-free autopilot mode with zero review, LinkedIn/Indeed direct one-click mass submission across every source, recruiter outreach automation.
+3. **Fix non-US leakage**
+   Recent SmartRecruiters jobs showed France/non-US locations in analytics. Before scaling further, verify location filtering and normalization.
 
----
+4. **Build JSON-LD universal crawler**
+   This is the best reusable fallback for company career pages and custom sources.
 
-### 5. Application Tracker
+5. **Add quick public-feed ATS adapters**
+   Start with JazzHR, BambooHR, Pinpoint, JobScore, Breezy, and Teamtailor.
 
-**What it does:** A Kanban-style pipeline that tracks every application the user sends, automatically updated where possible via Gmail sync.
+6. **Evaluate a paid aggregator bridge**
+   Test one source for quick MVP volume, but keep it separate and deduped.
 
-**Why it matters:** Users currently lose track of where they've applied. An auto-updating tracker removes the cognitive burden and surfaces follow-up opportunities.
-
-**Specifics:**
-- Pipeline stages: Saved → Applied → Screening → Interview → Offer → Rejected
-- Auto-create a card when user applies through the platform
-- Manual add for applications made outside the platform
-- Gmail sync (OAuth): detects recruiter replies, interview invites, and rejections → auto-updates card stage
-- In-app nudges: "No response from Stripe in 14 days — follow up?" 
-- Basic notes field on each card
-- Colour-coded status indicators
-
-**Out of scope for MVP:** Full email composition from tracker, networking/contact tracker, calendar integration (Phase 2).
+7. **Start core workflow implementation in parallel**
+   Profile, resume tailoring, tracker, and Chrome autofill should not wait until inventory is perfect.
 
 ---
 
-### 6. Gmail Integration (Sync Only)
+## Explicitly Out Of Scope For MVP
 
-**What it does:** Reads the user's job-related inbox to auto-update the application tracker and surface important signals.
-
-**Why it matters:** Manual tracker updating is the reason trackers don't get used. Auto-sync makes the tracker genuinely useful without the user having to think about it.
-
-**Specifics:**
-- Google OAuth connection (explicit, user-initiated)
-- Scoped read-only access to inbox
-- Detection of: recruiter replies, interview invitations, rejection emails, application confirmations
-- Auto-update corresponding tracker card when email detected
-- In-app notification: "We detected a reply from Stripe and updated your tracker"
-- Privacy controls: user can disconnect at any time, view what we've read, clear synced data
-- Optional: offer to help user set up a dedicated job-search email address for cleaner sync
-
-**Out of scope for MVP:** Outlook/Microsoft integration (Phase 2), composing emails from the platform, full inbox display.
+| Feature | Why |
+| --- | --- |
+| LinkedIn/Indeed direct crawling | Legal/TOS and blocking risk. |
+| Fully autonomous auto-apply | Too risky before quality gates and user trust are proven. |
+| Cover letter generation | Useful, but resume tailoring and autofill matter more first. |
+| Interview coaching | Valuable later, not needed to prove the core application loop. |
+| Mobile app | Web + Chrome extension first. |
+| Outlook sync | Gmail first. |
+| Recruiter/employer product | Different product. |
+| Full enterprise ATS coverage | Start with selected high-yield connectors. |
+| Ghost job detection | Phase 2 after freshness and source quality are stable. |
+| Payment/subscription | Prove usage and outcomes first. |
 
 ---
 
-### 7. Basic Analytics Dashboard
+## Technical Principles
 
-**What it does:** Shows the user a simple view of their job search performance — not vanity metrics, but metrics that tell them if they're on track.
+- Prefer direct ATS APIs/feeds and structured data over brittle scraping.
+- Use paid aggregators only as bridge inventory, not the long-term moat.
+- Normalize every job into a consistent internal schema.
+- Deduplicate before showing jobs to users.
+- Store both source-native IDs and unified fingerprints.
+- Keep user-facing matching explainable.
+- Do not hide data quality problems behind aggregate job counts.
 
-**Why it matters:** Users need to know their interview rate. It's our north star metric and it's the number that proves the product is working.
+## Definition Of Done For MVP
 
-**Specifics:**
-- Interview rate (applications sent vs. interviews secured)
-- Comparison to industry average (contextualises their performance)
-- Applications by stage (pipeline overview)
-- Interview rate by apply mode (reviewed vs. batch-applied)
-- Response rate by job source (which boards are working for them)
-- Weekly activity summary
-- ATS score trend over time (is their resume getting stronger?)
-
-**Out of scope for MVP:** Detailed funnel analytics, export to CSV, cohort analysis.
-
----
-
-## Out of Scope for MVP (Explicitly)
-
-These are Phase 2 or later. Do not be tempted to build them for MVP — they will dilute focus and delay learning.
-
-| Feature | Why it's out of scope |
-|---|---|
-| Cover letter generation | Valuable but not core to the loop; Phase 2 |
-| Interview prep / mock interviews | Post-match; Phase 2 after proving match quality |
-| Networking / recruiter outreach | Complex; Phase 2 |
-| LinkedIn profile optimisation | Adjacent; Phase 2 |
-| Mobile app | Build web first; mobile Phase 2 |
-| Outlook/Microsoft integration | Gmail first; Phase 2 |
-| Employer / recruiter tools | Different product entirely |
-| Job posting (own job board) | Aggregation is faster to validate |
-| Payments / premium tier | Free during MVP; monetise after PMF |
-| Team / referral features | Phase 3 |
-| ATS system detection by vendor | Valuable but complex; Phase 2 |
+- [ ] User can onboard and create a structured profile.
+- [ ] User sees at least 8 relevant job matches on first login.
+- [ ] Job feed supports freshness and location filters.
+- [ ] Job inventory has source/freshness/category analytics.
+- [ ] Resume checker identifies gaps against a selected job.
+- [ ] Tailored resume can be generated, reviewed, edited, and downloaded.
+- [ ] Chrome extension can add a job to AIJobs and autofill common application fields.
+- [ ] Application tracker records saved/applied jobs and stages.
+- [ ] Gmail sync updates tracker for common email signals.
+- [ ] Dashboard shows applications, response rate, and interview rate.
+- [ ] 10 beta users complete the full loop and provide feedback.
+- [ ] 100 active users complete the full loop during MVP validation.
 
 ---
 
-## Tech Considerations
-
-These are decisions to make early because they're expensive to reverse.
-
-**Matching engine:** Start with a semantic embedding model (OpenAI embeddings or open-source equivalent like sentence-transformers) to match user profiles against job descriptions. Do not start with keyword matching — it's what every competitor does and it produces poor results.
-
-**Job aggregation:** Use a third-party job data API (e.g., Adzuna, JSearch via RapidAPI, or The Muse) for initial job sourcing rather than building scrapers. Scrapers are brittle and expensive to maintain. Switch to direct sourcing once you have volume and know which sources convert best.
-
-**Resume parsing:** Use an established resume parsing library or API (Affinda, Sovren, or similar) for initial profile extraction. Do not build a custom parser for MVP — it's a solved problem and parsing edge cases will consume disproportionate engineering time.
-
-**Gmail OAuth:** Use Google's official OAuth2 flow with read-only Gmail scope (`gmail.readonly`). Be explicit in the OAuth consent screen about what you read and why. Do not request more permissions than you need.
-
-**Resume storage:** Store both the user's base resume and each tailored version. Design the data model to support multiple resume versions per user from day one — retrofitting this is painful.
-
-**AI tailoring:** GPT-4o or Claude Sonnet for resume bullet rewriting. Keep prompts modular — one prompt for keyword extraction, one for ATS scoring/gap detection, one for rewriting, one for the diff explanation. This makes it easier to improve each step independently.
-
-**Apply automation:** Start with guided batch apply, not blind full automation. The system should enforce thresholds for match quality and ATS score before a role becomes eligible for batch submission.
-
-**Infrastructure:** Start simple. A monolith is fine for MVP. Optimise for speed of iteration, not scalability. You can split services when you have real load.
-
----
-
-## Phased Roadmap
-
-### Phase 1 — MVP (Now → Month 3)
-The core loop. Prove it works.
-- Onboarding + profile extraction
-- Job matching feed (3 sources, semantic matching)
-- Per-role resume tailoring with diff view and built-in ATS checker
-- Guided batch apply with quality gates
-- Application tracker with Gmail sync
-- Basic analytics dashboard (interview rate)
-- Web app only
-
-**Exit criteria:** 100 users complete the full loop. Interview rate ≥ 25%. 40%+ 7-day retention.
-
----
-
-### Phase 2 — Deepen (Month 4 → Month 8)
-Make the loop stronger. Add the obvious next-step features users ask for.
-- Cover letter generation (per role, tailored)
-- ATS system detection (identify which ATS a company uses)
-- Interview prep module (role-specific questions, company research)
-- Calendar integration (auto-log interview slots from Gmail)
-- Outlook/Microsoft inbox sync
-- LinkedIn profile optimisation
-- Mobile-responsive web (not native app yet)
-- Dedicated job email provisioning
-- Freemium pricing launch
-
-**Exit criteria:** 1,000 active paying users. Interview rate holds at 25%+ at scale.
-
----
-
-### Phase 3 — Scale (Month 9 → Month 18)
-Grow and extend.
-- Precision auto-apply and broader bulk apply automation (gated: only fires on high-match + ATS-ready tailored resumes)
-- Networking intelligence (alumni and recruiter suggestions at target companies)
-- Vertical depth (software engineering specialisation first)
-- Native mobile app (iOS first)
-- Referral / sharing features
-- Advanced analytics (cohort analysis, source attribution)
-- API / integrations for career coaches and bootcamps (B2B seed)
-
----
-
-## Risks & Mitigations
-
-| Risk | Likelihood | Impact | Mitigation |
-|---|---|---|---|
-| Job data quality is poor (stale, duplicate, ghost jobs) | High | High | Use established job data APIs with freshness filters; add ghost job detection in Phase 2 |
-| Gmail OAuth trust barrier — users won't connect inbox | Medium | High | Make it optional; show clear value before asking; offer dedicated job email alternative |
-| AI tailoring produces generic or inaccurate output | Medium | High | Human review during beta; show diff view so user catches errors; iterate on prompts |
-| Batch apply lowers quality if thresholds are too loose | Medium | High | Require fit and ATS minimums; default to review-first; track interview rate by apply mode |
-| Match quality is low — users don't find matches relevant | Medium | High | Over-invest in profile extraction depth during onboarding; measure match acceptance rate from day one |
-| LinkedIn / Indeed block job scraping or API access | Medium | Medium | Use licensed job data APIs from the start; don't rely on scraping |
-| Competitor (Jobright) improves tailoring depth | Low | High | Move fast; launch MVP before they close the gap; build outcome feedback loop as a moat |
-| EU AI Act compliance for automated matching | Low | Medium | Include match reasoning/explainability from day one; document matching logic |
-
----
-
-## Definition of Done (MVP)
-
-The MVP is complete when:
-
-- [ ] A new user can sign up, upload a resume, and have a profile extracted in under 5 minutes
-- [ ] The user sees a curated feed of ≥ 8 relevant job matches on first login
-- [ ] The user can generate a tailored resume for any match in one click, see what changed, edit it, and download it
-- [ ] The ATS checker shows a before/after score with actionable fixes on the base and tailored resume
-- [ ] The user can submit applications individually or via a quality-gated batch flow
-- [ ] Every application is tracked automatically in the pipeline
-- [ ] Gmail sync detects at least recruiter replies and interview invites and updates the tracker correctly
-- [ ] The dashboard shows the user their interview rate vs. industry average
-- [ ] 10 beta users have gone through the full loop and been interviewed for feedback
-- [ ] Average interview rate across beta users is ≥ 20% (stretch: 25%)
-
----
-
-*This document is a working reference. Update it as you learn. When a feature moves from "out of scope" to "in scope," document why — that decision history is valuable context for the team.*
+This document is a working reference. Update it when the strategy changes, especially around source quality, application workflow, and user outcome learning.
