@@ -16,6 +16,8 @@ const ATS_HOSTS = [
   "careers.smartrecruiters.com",
   "jobs.smartrecruiters.com",
   "recruitee.com",
+  "icims.com",
+  "myworkdayjobs.com",
 ];
 
 function normalizeDomain(hostname: string) {
@@ -34,7 +36,12 @@ function domainFromUrl(url?: string | null) {
 
   try {
     const hostname = normalizeDomain(new URL(url).hostname);
-    if (!hostname || ATS_HOSTS.includes(hostname)) {
+    if (
+      !hostname ||
+      ATS_HOSTS.includes(hostname) ||
+      hostname.endsWith(".icims.com") ||
+      hostname.endsWith(".myworkdayjobs.com")
+    ) {
       return null;
     }
 

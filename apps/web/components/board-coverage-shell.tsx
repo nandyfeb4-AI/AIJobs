@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 type BoardStatus = "unverified" | "working" | "empty" | "failed";
-type AtsSource = "greenhouse" | "ashby" | "lever" | "workable" | "smartrecruiters" | "recruitee" | "adzuna";
+type AtsSource = "greenhouse" | "ashby" | "lever" | "workable" | "smartrecruiters" | "recruitee" | "icims" | "workday" | "adzuna";
 
 type SourceBoard = {
   id: string;

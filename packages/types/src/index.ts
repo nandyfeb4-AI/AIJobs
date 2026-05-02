@@ -15,6 +15,8 @@ export type ExternalJobSource =
   | "workable"
   | "smartrecruiters"
   | "recruitee"
+  | "icims"
+  | "workday"
   | "adzuna";
 
 export type SourceBoardConfig = {

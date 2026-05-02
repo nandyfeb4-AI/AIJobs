@@ -18,10 +18,12 @@ import {
 
 import { AshbyAdapter } from "./adapters/ashby.adapter";
 import { GreenhouseAdapter } from "./adapters/greenhouse.adapter";
+import { IcimsAdapter } from "./adapters/icims.adapter";
 import { LeverAdapter } from "./adapters/lever.adapter";
 import { RecruiteeAdapter } from "./adapters/recruitee.adapter";
 import { SmartRecruitersAdapter } from "./adapters/smartrecruiters.adapter";
 import { WorkableAdapter } from "./adapters/workable.adapter";
+import { WorkdayAdapter } from "./adapters/workday.adapter";
 import {
   getStarterBoardCatalog,
   getStarterBoards,
@@ -134,6 +136,8 @@ const BOARD_FIRST_SOURCES: BoardFirstSource[] = [
   "workable",
   "smartrecruiters",
   "recruitee",
+  "icims",
+  "workday",
 ];
 const SUPPORTED_ATS_SOURCES = new Set<BoardFirstSource>(BOARD_FIRST_SOURCES);
 const BOARD_REJECTION_COOLDOWN_DAYS = 14;
@@ -171,6 +175,8 @@ export class JobsService {
     @Inject(SmartRecruitersAdapter)
     smartRecruitersAdapter: SmartRecruitersAdapter,
     @Inject(RecruiteeAdapter) recruiteeAdapter: RecruiteeAdapter,
+    @Inject(IcimsAdapter) icimsAdapter: IcimsAdapter,
+    @Inject(WorkdayAdapter) workdayAdapter: WorkdayAdapter,
   ) {
     this.adapters = {
       greenhouse: greenhouseAdapter,
@@ -179,6 +185,8 @@ export class JobsService {
       workable: workableAdapter,
       smartrecruiters: smartRecruitersAdapter,
       recruitee: recruiteeAdapter,
+      icims: icimsAdapter,
+      workday: workdayAdapter,
       adzuna: {
         source: "adzuna",
         async fetchJobs(): Promise<AggregatedJob[]> {
@@ -276,7 +284,7 @@ export class JobsService {
                 "Prefer well-known companies first for tier=top, then strong category leaders for tier=priority, then broader growth companies for tier=growth.",
                 "Avoid duplicates, staffing firms, universities, government agencies, and companies with no clear corporate website.",
                 "Include careersUrl only when you found a likely careers page from web results; otherwise return null.",
-                "Use sourceHint only if the web evidence strongly suggests greenhouse, lever, ashby, workable, smartrecruiters, or recruitee; otherwise null.",
+                "Use sourceHint only if the web evidence strongly suggests greenhouse, lever, ashby, workable, smartrecruiters, recruitee, icims, or workday; otherwise null.",
               ].join(" "),
             },
           ],
@@ -1037,7 +1045,9 @@ export class JobsService {
       careersUrl.includes("ashbyhq.com") ||
       careersUrl.includes("workable.com") ||
       careersUrl.includes("smartrecruiters.com") ||
-      careersUrl.includes("recruitee.com")
+      careersUrl.includes("recruitee.com") ||
+      careersUrl.includes("icims.com") ||
+      careersUrl.includes("myworkdayjobs.com")
     ) {
       priority += 160;
     } else if (careersUrl) {
@@ -1268,6 +1278,7 @@ export class JobsService {
   private candidateBoardValidationDelayMs(source: ExternalJobSource) {
     if (source === "workable" || source === "recruitee") return 1200;
     if (source === "smartrecruiters") return 500;
+    if (source === "icims" || source === "workday") return 800;
     return 0;
   }
 
@@ -3014,7 +3025,7 @@ Return strict JSON:
 {
   "careersUrl": string | null,
   "companyDomain": string | null,
-  "sourceHint": "greenhouse" | "lever" | "ashby" | "workable" | "smartrecruiters" | "recruitee" | null,
+  "sourceHint": "greenhouse" | "lever" | "ashby" | "workable" | "smartrecruiters" | "recruitee" | "icims" | "workday" | null,
   "segments": string[],
   "confidence": number | null,
   "notes": string | null
@@ -3075,6 +3086,14 @@ Return strict JSON:
         "Search for direct Recruitee career pages using evidence like site:recruitee.com/o/ or company.recruitee.com.",
         "Use the company subdomain from <company>.recruitee.com.",
       ],
+      icims: [
+        "Search for direct iCIMS career pages using evidence like site:icims.com/jobs/search.",
+        "Prefer the company iCIMS search root URL and avoid guessed hostnames.",
+      ],
+      workday: [
+        "Search for direct Workday CXS public career sites using evidence like site:myworkdayjobs.com.",
+        "Use the full myworkdayjobs.com tenant and career site URL, not just the tenant name.",
+      ],
     };
 
     const sourcePatterns: Record<
@@ -3088,6 +3107,8 @@ Return strict JSON:
       workable: "https://apply.workable.com/<token>",
       smartrecruiters: "https://careers.smartrecruiters.com/<token>",
       recruitee: "https://<token>.recruitee.com",
+      icims: "https://<tenant>.icims.com/jobs/search",
+      workday: "https://<tenant>.wd1.myworkdayjobs.com/en-US/<site>",
     };
 
     return [
@@ -3218,6 +3239,8 @@ Return strict JSON:
         "jobs.smartrecruiters.com",
       ],
       recruitee: ["recruitee"],
+      icims: ["icims", "icims.com"],
+      workday: ["workday", "myworkdayjobs.com"],
     };
 
     const explicitIncludes = BOARD_FIRST_SOURCES.filter((source) =>
@@ -3289,6 +3312,8 @@ Return strict JSON:
         "jobs.smartrecruiters.com",
       ],
       recruitee: ["recruitee.com"],
+      icims: ["icims.com"],
+      workday: ["myworkdayjobs.com"],
     };
 
     const focusTermsByArea: Record<string, string[]> = {
@@ -3800,6 +3825,14 @@ Return strict JSON:
         `Find real Recruitee career sites on <company>.recruitee.com for US companies hiring in ${roleFamilies}.`,
         `Find Recruitee /o/ job posting URLs for software, data, product, QA, cloud, security, and IT roles in the US.`,
       ],
+      icims: [
+        `Find real iCIMS career search pages on icims.com/jobs/search for US companies hiring in ${roleFamilies}.`,
+        `Find iCIMS /jobs/search or /jobs/<id>/ job posting URLs for software, data, product, QA, cloud, security, and IT roles in the US.`,
+      ],
+      workday: [
+        `Find real Workday myworkdayjobs.com career site URLs for US companies hiring in ${roleFamilies}.`,
+        `Find Workday job posting URLs on myworkdayjobs.com for software, data, product, QA, cloud, security, and IT roles in the US.`,
+      ],
     };
     const sampledDirectQueries = this.sampleSearchQueries(
       input.directQueries,
@@ -3858,6 +3891,14 @@ Return strict JSON:
       recruitee: [
         `Backfill more real Recruitee career sites on company.recruitee.com for US technology companies hiring in ${roleFamilies}. ${avoidClause}`,
         `Find additional Recruitee /o/ posting URLs for software, data, product, QA, cloud, security, and IT roles in the US. ${avoidClause}`,
+      ],
+      icims: [
+        `Backfill more real iCIMS career search pages on icims.com/jobs/search for US technology companies hiring in ${roleFamilies}. ${avoidClause}`,
+        `Find additional iCIMS job posting URLs for software, data, product, QA, cloud, security, and IT roles in the US. ${avoidClause}`,
+      ],
+      workday: [
+        `Backfill more real Workday myworkdayjobs.com career sites for US technology companies hiring in ${roleFamilies}. ${avoidClause}`,
+        `Find additional Workday myworkdayjobs.com job posting URLs for software, data, product, QA, cloud, security, and IT roles in the US. ${avoidClause}`,
       ],
     };
     const customQuery = input.customQuery?.trim()
@@ -4191,6 +4232,16 @@ Return strict JSON:
           ? "job_posting_url"
           : "board_root_url";
       }
+
+      if (source === "icims" && hostname.endsWith(".icims.com")) {
+        return segments.includes("jobs") && segments.some((segment) => /^\d+$/.test(segment))
+          ? "job_posting_url"
+          : "board_root_url";
+      }
+
+      if (source === "workday" && hostname.endsWith(".myworkdayjobs.com")) {
+        return segments.includes("job") ? "job_posting_url" : "board_root_url";
+      }
     } catch {
       return "unknown";
     }
@@ -4450,6 +4501,8 @@ Return strict JSON:
       workable: `https://apply.workable.com/${boardToken}`,
       smartrecruiters: `https://careers.smartrecruiters.com/${boardToken}`,
       recruitee: `https://${boardToken}.recruitee.com`,
+      icims: boardToken,
+      workday: boardToken,
     };
 
     try {
@@ -4467,11 +4520,17 @@ Return strict JSON:
           (source === "smartrecruiters" &&
             (hostname === "careers.smartrecruiters.com" ||
               hostname === "jobs.smartrecruiters.com")) ||
-          (source === "recruitee" && hostname.endsWith(".recruitee.com"))
+          (source === "recruitee" && hostname.endsWith(".recruitee.com")) ||
+          (source === "icims" && hostname.endsWith(".icims.com")) ||
+          (source === "workday" && hostname.endsWith(".myworkdayjobs.com"))
         ) {
-          return source === "recruitee"
-            ? `https://${boardToken}.recruitee.com`
-            : `${parsed.protocol}//${parsed.hostname}/${boardToken}`;
+          if (source === "recruitee") {
+            return `https://${boardToken}.recruitee.com`;
+          }
+          if (source === "icims" || source === "workday") {
+            return boardToken;
+          }
+          return `${parsed.protocol}//${parsed.hostname}/${boardToken}`;
         }
       }
     } catch {
@@ -4844,12 +4903,18 @@ Return strict JSON:
       "jobs.smartrecruiters.com",
       "api.smartrecruiters.com",
       "recruitee.com",
+      "icims.com",
+      "myworkdayjobs.com",
       "boards-api.greenhouse.io",
       "api.lever.co",
       "api.ashbyhq.com",
     ]);
 
-    return atsHosts.has(domain) ? null : domain;
+    return atsHosts.has(domain) ||
+      domain.endsWith(".icims.com") ||
+      domain.endsWith(".myworkdayjobs.com")
+      ? null
+      : domain;
   }
 
   private async filterNewCandidateCompanies(

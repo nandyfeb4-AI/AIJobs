@@ -8,10 +8,12 @@ import type { AggregatedJob, ExternalJobSource } from "@aijobs/types";
 
 import { AshbyAdapter } from "../../api/src/jobs/adapters/ashby.adapter";
 import { GreenhouseAdapter } from "../../api/src/jobs/adapters/greenhouse.adapter";
+import { IcimsAdapter } from "../../api/src/jobs/adapters/icims.adapter";
 import { LeverAdapter } from "../../api/src/jobs/adapters/lever.adapter";
 import { RecruiteeAdapter } from "../../api/src/jobs/adapters/recruitee.adapter";
 import { SmartRecruitersAdapter } from "../../api/src/jobs/adapters/smartrecruiters.adapter";
 import { WorkableAdapter } from "../../api/src/jobs/adapters/workable.adapter";
+import { WorkdayAdapter } from "../../api/src/jobs/adapters/workday.adapter";
 import { discoverBoardsForCompany, extractBoardsFromText } from "../../api/src/jobs/board-discovery";
 import { getStarterBoardMetadata } from "../../api/src/jobs/board-catalog";
 import { getTargetCompanies, getTargetCompanyById } from "../../api/src/jobs/target-company-catalog";
@@ -37,6 +39,8 @@ const adapters: Record<ExternalJobSource, { fetchJobs(boardToken: string): Promi
   workable: new WorkableAdapter(),
   smartrecruiters: new SmartRecruitersAdapter(),
   recruitee: new RecruiteeAdapter(),
+  icims: new IcimsAdapter(),
+  workday: new WorkdayAdapter(),
   adzuna: {
     async fetchJobs() {
       return [];
@@ -109,7 +113,9 @@ function inferExpectedSource(sourceHint?: string | null, careersUrl?: string | n
     sourceHint === "ashby" ||
     sourceHint === "workable" ||
     sourceHint === "smartrecruiters" ||
-    sourceHint === "recruitee"
+    sourceHint === "recruitee" ||
+    sourceHint === "icims" ||
+    sourceHint === "workday"
   ) {
     return sourceHint;
   }
@@ -120,6 +126,8 @@ function inferExpectedSource(sourceHint?: string | null, careersUrl?: string | n
   if (url.includes("workable.com")) return "workable";
   if (url.includes("smartrecruiters.com")) return "smartrecruiters";
   if (url.includes("recruitee.com")) return "recruitee";
+  if (url.includes("icims.com")) return "icims";
+  if (url.includes("myworkdayjobs.com")) return "workday";
   return "greenhouse";
 }
 

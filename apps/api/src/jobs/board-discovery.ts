@@ -43,6 +43,7 @@ const GENERIC_TOKEN_DENYLIST = new Set([
   "embed",
   "greenhouse",
   "iframe",
+  "icims",
   "job",
   "job_app",
   "job_board",
@@ -59,6 +60,7 @@ const GENERIC_TOKEN_DENYLIST = new Set([
   "v0",
   "v1",
   "workable",
+  "workday",
 ]);
 
 const GENERIC_TOKEN_DENYLIST_PATTERNS = [
@@ -114,6 +116,41 @@ function normalizeToken(source: ExternalJobSource, token: string) {
     return /^[a-z0-9][a-z0-9-]{1,100}$/i.test(normalizedToken) ? normalizedToken : null;
   }
 
+  if (source === "icims") {
+    try {
+      const parsed = normalizedToken.includes("://")
+        ? new URL(normalizedToken)
+        : new URL(`https://${normalizedToken}`);
+      const hostname = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+      if (!hostname.endsWith(".icims.com")) return null;
+      const searchPath = parsed.pathname.includes("/jobs/search")
+        ? parsed.pathname
+        : "/jobs/search";
+      return `https://${hostname}${searchPath}`;
+    } catch {
+      return null;
+    }
+  }
+
+  if (source === "workday") {
+    try {
+      const parsed = normalizedToken.includes("://")
+        ? new URL(normalizedToken)
+        : new URL(`https://${normalizedToken}`);
+      const hostname = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+      if (!hostname.endsWith(".myworkdayjobs.com")) return null;
+      const segments = parsed.pathname.split("/").filter(Boolean);
+      const firstSegment = segments[0] ?? "";
+      const hasLocale = /^[a-z]{2}(?:-[A-Z]{2})?$/i.test(firstSegment);
+      const locale = hasLocale ? firstSegment : "en-US";
+      const site = hasLocale ? segments[1] : firstSegment;
+      if (!site) return null;
+      return `https://${hostname}/${locale}/${site}`;
+    } catch {
+      return null;
+    }
+  }
+
   return null;
 }
 
@@ -165,6 +202,17 @@ function addDiscoveredBoard(
 
 function pathSegment(url: URL, index: number) {
   return url.pathname.split("/").filter(Boolean)[index] ?? null;
+}
+
+function workdayBoardUrl(parsed: URL) {
+  const hostname = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  const firstSegment = segments[0] ?? "";
+  const hasLocale = /^[a-z]{2}(?:-[A-Z]{2})?$/i.test(firstSegment);
+  const locale = hasLocale ? firstSegment : "en-US";
+  const site = hasLocale ? segments[1] : firstSegment;
+
+  return site ? `https://${hostname}/${locale}/${site}` : null;
 }
 
 function extractBoardFromUrl(rawUrl: string, evidenceUrl: string) {
@@ -228,6 +276,14 @@ function extractBoardFromUrl(rawUrl: string, evidenceUrl: string) {
 
     if (hostname.endsWith(".recruitee.com") && hostname !== "www.recruitee.com") {
       addDiscoveredBoard(boards, "recruitee", hostname.split(".")[0] ?? null, rawUrl);
+    }
+
+    if (hostname.endsWith(".icims.com")) {
+      addDiscoveredBoard(boards, "icims", `${parsed.origin}/jobs/search`, rawUrl);
+    }
+
+    if (hostname.endsWith(".myworkdayjobs.com")) {
+      addDiscoveredBoard(boards, "workday", workdayBoardUrl(parsed), rawUrl);
     }
   } catch {
     return [];
@@ -346,6 +402,46 @@ async function probeBoardCandidate(candidate: DiscoveredBoard) {
           },
         );
         break;
+      case "icims":
+        response = await fetch(candidate.boardToken, {
+          redirect: "follow",
+          signal: controller.signal,
+          headers: {
+            "user-agent":
+              "Mozilla/5.0 (compatible; AIJobsDiscoveryBot/0.1; +https://aijobs.local/discovery)",
+          },
+        });
+        break;
+      case "workday": {
+        const parsed = new URL(candidate.boardToken);
+        const host = parsed.hostname.replace(/^www\./i, "").toLowerCase();
+        const tenant = host.split(".")[0];
+        const segments = parsed.pathname.split("/").filter(Boolean);
+        const firstSegment = segments[0] ?? "";
+        const site = /^[a-z]{2}(?:-[A-Z]{2})?$/i.test(firstSegment)
+          ? segments[1]
+          : firstSegment;
+        if (!tenant || !site) return false;
+        response = await fetch(
+          `https://${host}/wday/cxs/${tenant}/${site}/jobs`,
+          {
+            method: "POST",
+            redirect: "follow",
+            signal: controller.signal,
+            headers: {
+              "content-type": "application/json",
+              accept: "application/json",
+            },
+            body: JSON.stringify({
+              appliedFacets: {},
+              limit: 1,
+              offset: 0,
+              searchText: "",
+            }),
+          },
+        );
+        break;
+      }
       default:
         return false;
     }

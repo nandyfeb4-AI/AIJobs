@@ -96,6 +96,8 @@ const BOARD_VALIDATION_SOURCES = [
   "greenhouse",
   "lever",
   "ashby",
+  "icims",
+  "workday",
 ] as const;
 
 function formatRelativeish(timestamp?: string | null) {
@@ -159,7 +161,9 @@ function classifyResearchBacklog(company: CandidateCompany) {
     url.includes("ashbyhq.com") ||
     url.includes("workable.com") ||
     url.includes("smartrecruiters.com") ||
-    url.includes("recruitee.com")
+    url.includes("recruitee.com") ||
+    url.includes("icims.com") ||
+    url.includes("myworkdayjobs.com")
   ) {
     return "Retry Supported ATS";
   }
@@ -283,7 +287,9 @@ function parseCandidateCsv(input: string) {
         sourceHint === "ashby" ||
         sourceHint === "workable" ||
         sourceHint === "smartrecruiters" ||
-        sourceHint === "recruitee"
+        sourceHint === "recruitee" ||
+        sourceHint === "icims" ||
+        sourceHint === "workday"
         ? sourceHint
         : undefined;
     const tier = tierIndex >= 0 ? row[tierIndex]?.trim() : "";
