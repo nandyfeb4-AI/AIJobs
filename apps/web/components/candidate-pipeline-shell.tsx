@@ -504,6 +504,7 @@ function CandidateCompaniesPanel() {
     focusAreas: string;
     customQuery: string;
   }>({ tier: "top", limit: 25, focusAreas: DEFAULT_IT_FOCUS_AREAS, customQuery: "" });
+  const [pipelineLimit, setPipelineLimit] = useState("50");
   const [importJson, setImportJson] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
   const [actionState, setActionState] = useState<{
@@ -698,12 +699,15 @@ function CandidateCompaniesPanel() {
   }
 
   async function handlePipeline() {
+    const limit = Math.min(1000, Math.max(1, Number(pipelineLimit) || 50));
+    setPipelineLimit(String(limit));
+
     try {
       setActionState({ kind: "pipeline", pending: true, message: "Queuing background candidate pipeline..." });
       const response = await fetch(`${apiBase()}/jobs/candidate-pipeline/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ limit: 1000 }),
+        body: JSON.stringify({ limit }),
       });
       if (!response.ok) throw new Error(`Request failed with ${response.status}`);
       const result = (await response.json()) as { enqueued?: number; candidateCompanies?: number };
@@ -890,6 +894,20 @@ function CandidateCompaniesPanel() {
                 "Enrich Candidates"
               )}
             </button>
+            <div>
+              <label className="block text-[11px] uppercase tracking-[0.12em] text-sage mb-1.5">
+                Pipeline Limit
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={1000}
+                value={pipelineLimit}
+                onChange={(event) => setPipelineLimit(event.target.value)}
+                onBlur={() => setPipelineLimit(String(Math.min(1000, Math.max(1, Number(pipelineLimit) || 50))))}
+                className="w-full rounded-full border border-line bg-parchment/50 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-1 focus:ring-accent/40"
+              />
+            </div>
             <button
               type="button"
               onClick={() => void handleDiscover()}

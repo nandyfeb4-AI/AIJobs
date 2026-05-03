@@ -1212,6 +1212,25 @@ export class JobsService {
         const message =
           error instanceof Error ? error.message : "Unknown validation error";
 
+        if (source === "workday" && message.toLowerCase().includes("403")) {
+          await (this.prisma as any).candidateBoard.update({
+            where: { id: board.id },
+            data: {
+              status: "discovered",
+              validationError: `Deferred due to transient Workday 403: ${message}`,
+            },
+          });
+
+          results.push({
+            id: board.id,
+            boardToken: board.boardToken,
+            sourceName: board.sourceName,
+            status: "deferred",
+            reason: "transient_workday_403",
+          });
+          continue;
+        }
+
         if (this.isCandidateBoardRateLimit(source, message)) {
           rateLimitedSources.add(source);
 
@@ -1287,7 +1306,7 @@ export class JobsService {
     message: string,
   ) {
     const normalized = message.toLowerCase();
-    if (source === "workable") {
+    if (source === "workable" || source === "workday") {
       return (
         normalized.includes("403") ||
         normalized.includes("429") ||

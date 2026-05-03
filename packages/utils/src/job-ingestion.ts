@@ -164,12 +164,13 @@ const US_LOCATION_PATTERNS = [
   /\bunited states\b/i,
   /\busa\b/i,
   /\bu\.s\.a\.\b/i,
-  /\bu\.s\.\b/i,
+  /\bu\.?s\.?\b/i,
   /\bus-only\b/i,
   /\bus only\b/i,
   /\bus-based\b/i,
   /\bus based\b/i,
-  /\bremote(?:\s|-)*(?:us|usa|united states)\b/i,
+  /\bus[-/][a-z]/i,
+  /\bremote(?:\s|-)*(?:u\.?s\.?|usa|united states)\b/i,
   /\bnorth america\b/i,
   /\banywhere in (?:the )?(?:us|usa|united states)\b/i,
   /\bwithin (?:the )?(?:us|usa|united states)\b/i,
@@ -398,12 +399,7 @@ export function isUsRelevantJob(job: JobLike) {
     return false;
   }
 
-  const abbreviationPattern = new RegExp(
-    `(?:^|,\\s*)(?:${US_STATE_ABBREVIATIONS.join("|")})(?=\\s*,|\\s*$)`,
-    "i",
-  );
-
-  return abbreviationPattern.test(job.location ?? "");
+  return hasUsStateAbbreviationLocationSignal(job.location);
 }
 
 function hasUsLocationSignal(searchable: string) {
@@ -416,6 +412,22 @@ function hasUsLocationSignal(searchable: string) {
   }
 
   return US_STATE_NAME_PATTERNS.some((pattern) => pattern.test(searchable));
+}
+
+function hasUsStateAbbreviationLocationSignal(location?: string | null) {
+  if (!location) {
+    return false;
+  }
+
+  const abbreviations = US_STATE_ABBREVIATIONS.join("|");
+  const patterns = [
+    // City/state forms: "Englewood, CO", "Remote, WI"
+    new RegExp(`,\\s*(?:${abbreviations})(?:\\s*,|\\s*$)`, "i"),
+    // Workday often emits state-first labels: "TX - Richardson", "MN - St. Paul"
+    new RegExp(`(?:^|[\\s·/])(?:${abbreviations})\\s*-\\s*[^,]+`, "i"),
+  ];
+
+  return patterns.some((pattern) => pattern.test(location));
 }
 
 function hasExplicitNonUsCountryCode(location?: string | null) {

@@ -146,7 +146,7 @@ export class WorkdayAdapter implements SourceAdapter {
 
   async fetchJobs(boardToken: string): Promise<AggregatedJob[]> {
     const board = parseWorkdayBoardToken(boardToken);
-    const limit = 100;
+    const limit = 20;
     const summaries: WorkdayJobSummary[] = [];
 
     for (let offset = 0; offset < 500; offset += limit) {

@@ -29,6 +29,12 @@ type JsonLdLocation = {
   name?: string | null;
 };
 
+type IcimsJobListing = {
+  url: string;
+  title?: string | null;
+  location?: string | null;
+};
+
 function normalizeBoardUrl(boardToken: string) {
   const raw = boardToken.trim();
   if (!raw) throw new Error("iCIMS board token is empty");
@@ -58,27 +64,93 @@ function htmlDecode(value: string) {
     .replace(/&nbsp;/gi, " ");
 }
 
-function extractJobLinks(html: string, baseUrl: string) {
-  const links = new Set<string>();
-  const patterns = [
+function cleanText(value?: string | null) {
+  const cleaned = stripHtml(value ?? "")?.replace(/\s+/g, " ").trim();
+  return cleaned || null;
+}
+
+function firstCaptureText(html: string, patterns: RegExp[]) {
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    const text = cleanText(match?.[1]);
+    if (text) return text;
+  }
+
+  return null;
+}
+
+function extractCardTitle(cardHtml: string) {
+  return firstCaptureText(cardHtml, [
+    /<span[^>]*class=["']sr-only field-label["'][^>]*>\s*(?:Job\s+)?Title\s*<\/span>\s*<h3[^>]*>([\s\S]*?)<\/h3>/i,
+    /<div[^>]*class=["'][^"']*\btitle\b[^"']*["'][^>]*>[\s\S]*?<h3[^>]*>([\s\S]*?)<\/h3>/i,
+    /<a[^>]+title=["'](?:\d+\s*-\s*)?([^"']+)["'][^>]*>/i,
+  ]);
+}
+
+function extractCardLocation(cardHtml: string) {
+  return firstCaptureText(cardHtml, [
+    /<span[^>]*class=["']sr-only field-label["'][^>]*>\s*(?:Job\s+)?Locations?\s*<\/span>\s*<span[^>]*>([\s\S]*?)<\/span>/i,
+    /<span[^>]*class=["']sr-only field-label["'][^>]*>\s*(?:Job\s+)?Locations?\s*<\/span>[\s\S]*?<dd[^>]*class=["'][^"']*\biCIMS_JobHeaderData\b[^"']*["'][^>]*>\s*<span[^>]*>([\s\S]*?)<\/span>/i,
+    /<dt[^>]*class=["'][^"']*\biCIMS_JobHeaderField\b[^"']*["'][^>]*>[\s\S]*?(?:Job\s+)?Locations?[\s\S]*?<\/dt>\s*<dd[^>]*class=["'][^"']*\biCIMS_JobHeaderData\b[^"']*["'][^>]*>\s*<span[^>]*>([\s\S]*?)<\/span>/i,
+  ]);
+}
+
+function extractJobListings(html: string, baseUrl: string) {
+  const listings = new Map<string, IcimsJobListing>();
+  const cards = html.matchAll(
+    /<li[^>]*class=["'][^"']*\biCIMS_JobCardItem\b[^"']*["'][^>]*>([\s\S]*?)<\/li>/gi,
+  );
+
+  for (const card of cards) {
+    const cardHtml = card[1] ?? "";
+    const href =
+      cardHtml.match(/href=["']([^"']*\/jobs\/\d+\/[^"']*\/job[^"']*)["']/i)?.[1] ??
+      cardHtml.match(/data-url=["']([^"']*\/jobs\/\d+\/[^"']*\/job[^"']*)["']/i)?.[1];
+
+    if (!href) continue;
+
+    try {
+      const url = new URL(htmlDecode(href), baseUrl).toString();
+      listings.set(url, {
+        url,
+        title: extractCardTitle(cardHtml),
+        location: extractCardLocation(cardHtml),
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  const linkPatterns = [
     /href=["']([^"']*\/jobs\/\d+\/[^"']*\/job[^"']*)["']/gi,
     /data-url=["']([^"']*\/jobs\/\d+\/[^"']*\/job[^"']*)["']/gi,
   ];
 
-  for (const pattern of patterns) {
+  for (const pattern of linkPatterns) {
     for (const match of html.matchAll(pattern)) {
       const href = match[1];
       if (!href) continue;
 
       try {
-        links.add(new URL(htmlDecode(href), baseUrl).toString());
+        const url = new URL(htmlDecode(href), baseUrl).toString();
+        if (listings.has(url)) continue;
+
+        const start = Math.max(0, match.index - 1500);
+        const end = Math.min(html.length, match.index + (match[0]?.length ?? 0) + 1500);
+        const windowHtml = html.slice(start, end);
+
+        listings.set(url, {
+          url,
+          title: extractCardTitle(windowHtml),
+          location: extractCardLocation(windowHtml),
+        });
       } catch {
         continue;
       }
     }
   }
 
-  return Array.from(links);
+  return Array.from(listings.values());
 }
 
 function parseJsonLdJobPosting(html: string) {
@@ -179,7 +251,7 @@ export class IcimsAdapter implements SourceAdapter {
 
   async fetchJobs(boardToken: string): Promise<AggregatedJob[]> {
     const searchUrl = normalizeBoardUrl(boardToken);
-    const links: string[] = [];
+    const listings: IcimsJobListing[] = [];
     const seenLinks = new Set<string>();
 
     for (let page = 0; page < 5; page += 1) {
@@ -199,29 +271,30 @@ export class IcimsAdapter implements SourceAdapter {
       }
 
       const html = await response.text();
-      const pageLinks = extractJobLinks(html, searchUrl.toString()).filter(
-        (link) => !seenLinks.has(link),
+      const pageListings = extractJobListings(html, searchUrl.toString()).filter(
+        (listing) => !seenLinks.has(listing.url),
       );
 
-      for (const link of pageLinks) {
-        seenLinks.add(link);
-        links.push(link);
+      for (const listing of pageListings) {
+        seenLinks.add(listing.url);
+        listings.push(listing);
       }
 
-      if (pageLinks.length === 0 || links.length >= 500) {
+      if (pageListings.length === 0 || listings.length >= 500) {
         break;
       }
     }
 
     const details = await Promise.all(
-      links.map(async (url) => {
+      listings.map(async (listing) => {
         try {
+          const url = listing.url;
           const response = await fetch(url, { redirect: "follow" });
           return response.ok
-            ? { url: response.url, html: await response.text() }
-            : { url, html: "" };
+            ? { listing, url: response.url, html: await response.text() }
+            : { listing, url, html: "" };
         } catch {
-          return { url, html: "" };
+          return { listing, url: listing.url, html: "" };
         }
       }),
     );
@@ -233,8 +306,10 @@ export class IcimsAdapter implements SourceAdapter {
         const title =
           jsonLd?.title ??
           firstTagText(detail.html, "h1") ??
+          detail.listing.title ??
           firstTagText(detail.html, "title") ??
           "Untitled role";
+        const location = locationLabel(jsonLd) ?? detail.listing.location ?? null;
         const companyFallback =
           jsonLd?.hiringOrganization?.name ??
           formatBoardToken(searchUrl.hostname.split(".")[0] ?? boardToken);
@@ -252,7 +327,7 @@ export class IcimsAdapter implements SourceAdapter {
           title,
           company: branding.company,
           companyLogoUrl: branding.companyLogoUrl,
-          location: locationLabel(jsonLd),
+          location,
           workMode: workModeFromJob(jsonLd, detail.html),
           employmentType: employmentTypeLabel(jsonLd?.employmentType),
           salary: buildSalaryLabel([]),
